@@ -1,4 +1,4 @@
-package main
+package llm
 
 import (
 	"bytes"
@@ -13,9 +13,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/tmc/langchaingo/llms"
 	"google.golang.org/api/googleapi"
 )
+
+const maxLoggedPayloadChars = 4000
 
 type geminiModel struct {
 	apiKey       string
@@ -119,7 +122,7 @@ type geminiErrorEnvelope struct {
 	} `json:"error"`
 }
 
-func newGeminiModel(apiKey, defaultModel string, httpClient *http.Client) llms.Model {
+func NewGeminiModel(apiKey, defaultModel string, httpClient *http.Client) llms.Model {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -184,10 +187,10 @@ func (g *geminiModel) GenerateContent(ctx context.Context, messages []llms.Messa
 		"status_code", resp.StatusCode,
 		"has_thought_signature", bytes.Contains(respBody, []byte("thoughtSignature")),
 	)
-	if payloadLoggingEnabled() {
+	if util.ClientPayloadLoggingEnabled() {
 		slog.Debug("Raw Gemini HTTP response body",
 			"model", opts.Model,
-			"body", truncateForLog(string(respBody), maxLoggedPayloadChars),
+			"body", util.TruncateForLog(string(respBody), maxLoggedPayloadChars),
 		)
 	}
 

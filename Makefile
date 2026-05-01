@@ -6,13 +6,14 @@ CLI_NAME=elastic-cli
 all: build build-cli
 
 build:
-	go build -o $(BINARY_NAME) main.go
+	go build -o $(BINARY_NAME) ./cmd/server/main.go
 
 build-cli:
 	go build -o $(CLI_NAME) ./cmd/cli/
 
 clean:
 	rm -f $(BINARY_NAME) $(CLI_NAME)
+	rm -f *.log
 
 run: build
 	./$(BINARY_NAME)
