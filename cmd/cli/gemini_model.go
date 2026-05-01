@@ -183,8 +183,13 @@ func (g *geminiModel) GenerateContent(ctx context.Context, messages []llms.Messa
 		"model", opts.Model,
 		"status_code", resp.StatusCode,
 		"has_thought_signature", bytes.Contains(respBody, []byte("thoughtSignature")),
-		"body", truncateForLog(string(respBody), 12000),
 	)
+	if payloadLoggingEnabled() {
+		slog.Debug("Raw Gemini HTTP response body",
+			"model", opts.Model,
+			"body", truncateForLog(string(respBody), maxLoggedPayloadChars),
+		)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var envelope geminiErrorEnvelope
@@ -201,6 +206,9 @@ func (g *geminiModel) GenerateContent(ctx context.Context, messages []llms.Messa
 	var parsed geminiGenerateContentResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return nil, err
+	}
+	if len(parsed.Candidates) == 0 {
+		slog.Warn("Gemini returned no candidates", "model", opts.Model, "response_id", parsed.ResponseID)
 	}
 
 	return g.convertResponse(parsed), nil

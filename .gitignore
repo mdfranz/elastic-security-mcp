@@ -1,1 +1,3 @@
 elastic-mcp-server	
+elastic-cli
+*.log

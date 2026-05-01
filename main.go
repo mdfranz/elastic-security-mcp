@@ -4,14 +4,49 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+const maxLoggedBodyChars = 2048
+
+func logLevelFromEnv() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MCP_LOG_LEVEL"))) {
+	case "", "info":
+		return slog.LevelInfo
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func truncateForLog(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "...(truncated)"
+}
+
+func httpError(method string, res *esapi.Response) error {
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("%s failed with status %s: reading error body: %w", method, res.Status(), err)
+	}
+	return fmt.Errorf("%s failed with status %s: %s", method, res.Status(), truncateForLog(strings.TrimSpace(string(body)), maxLoggedBodyChars))
+}
 
 func main() {
 	// 1. Logging Setup
@@ -29,7 +64,7 @@ func main() {
 
 	// Initialize slog to write to the file so it doesn't corrupt stdio MCP transport
 	logger := slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: logLevelFromEnv(),
 	}))
 	slog.SetDefault(logger)
 
@@ -105,6 +140,11 @@ func main() {
 			return nil, nil, fmt.Errorf("list indices error: %w", err)
 		}
 		defer res.Body.Close()
+		if res.IsError() {
+			err := httpError("cat indices", res)
+			slog.Warn("list indices request failed", "error", err)
+			return nil, nil, err
+		}
 
 		var indices []map[string]interface{}
 		if err := json.NewDecoder(res.Body).Decode(&indices); err != nil {
@@ -113,7 +153,10 @@ func main() {
 		}
 
 		slog.Info("list_indices result", "count", len(indices))
-		jsonOutput, _ := json.MarshalIndent(indices, "", "  ")
+		jsonOutput, err := json.MarshalIndent(indices, "", "  ")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to encode indices response: %w", err)
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{Text: string(jsonOutput)},
@@ -133,20 +176,24 @@ func main() {
 			args.Query = `{"query": {"match_all": {}}}`
 		}
 
-		slog.Info("search_elastic called", "index", args.Index, "query", args.Query)
+		slog.Info("search_elastic called", "index", args.Index, "query_chars", len(args.Query))
 
 		// Perform the search
 		searchRes, err := es.Search(
 			es.Search.WithContext(ctx),
 			es.Search.WithIndex(args.Index),
 			es.Search.WithBody(strings.NewReader(args.Query)),
-			es.Search.WithPretty(),
 		)
 		if err != nil {
 			slog.Error("search error", "error", err, "index", args.Index)
 			return nil, nil, fmt.Errorf("search error: %w", err)
 		}
 		defer searchRes.Body.Close()
+		if searchRes.IsError() {
+			err := httpError("search", searchRes)
+			slog.Warn("search request failed", "index", args.Index, "error", err)
+			return nil, nil, err
+		}
 
 		// Parse the result
 		var result map[string]interface{}
@@ -164,7 +211,10 @@ func main() {
 		slog.Info("search_elastic result", "took", took, "hits", value)
 
 		// Return formatted result
-		jsonOutput, _ := json.MarshalIndent(result, "", "  ")
+		jsonOutput, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to encode search response: %w", err)
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -175,8 +225,11 @@ func main() {
 	})
 
 	// 6. Run Server over Stdio
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	slog.Info("Server listening on stdio")
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 		slog.Error("server run error", "error", err)
 		os.Exit(1)
 	}
