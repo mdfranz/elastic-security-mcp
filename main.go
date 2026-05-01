@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -13,12 +13,32 @@ import (
 )
 
 func main() {
-	// 1. Environment Variables
+	// 1. Logging Setup
+	logFile := os.Getenv("MCP_LOG_FILE")
+	if logFile == "" {
+		logFile = "elastic-mcp-server.log"
+	}
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	// Initialize slog to write to the file so it doesn't corrupt stdio MCP transport
+	logger := slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
+
+	// 2. Environment Variables
 	elasticURL := os.Getenv("ELASTIC_URL")
 	elasticKey := os.Getenv("ELASTIC_KEY")
 
 	if elasticURL == "" || elasticKey == "" {
-		log.Fatal("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
+		slog.Error("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
+		os.Exit(1)
 	}
 
 	// 2. Initialize Elasticsearch Client
@@ -28,17 +48,20 @@ func main() {
 	}
 	es, err := elasticsearch.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("Error creating the elasticsearch client: %s", err)
+		slog.Error("Error creating the elasticsearch client", "error", err)
+		os.Exit(1)
 	}
 
-	// Skip connectivity check in this version for simplicity, 
+	// Skip connectivity check in this version for simplicity,
 	// or make it optional. For now, let's keep it but handle it gracefully.
 	res, err := es.Info()
 	if err != nil {
-		log.Printf("Warning: Could not connect to Elasticsearch: %s", err)
+		slog.Warn("Could not connect to Elasticsearch", "error", err)
 	} else {
 		res.Body.Close()
 	}
+
+	slog.Info("Starting elastic-mcp-server", "url", elasticURL)
 
 	// 3. Create MCP Server
 	server := mcp.NewServer(
@@ -49,13 +72,47 @@ func main() {
 		nil,
 	)
 
-	// 4. Define Search Tool Arguments
+	// 4. Define Tool Arguments
+	type ListIndicesArgs struct{}
+
 	type SearchArgs struct {
-		Index string `json:"index" jsonschema:"The index to search in"`
-		Query string `json:"query" jsonschema:"The JSON search DSL query string"`
+		Index string `json:"index" jsonschema:"The index pattern to search (e.g. logs-* or .alerts-security.alerts-default)"`
+		Query string `json:"query" jsonschema:"The Elasticsearch JSON query DSL string"`
 	}
 
-	// 5. Register Search Tool
+	// 5a. Register List Indices Tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_indices",
+		Description: "List all available Elasticsearch indices",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
+		slog.Info("list_indices called")
+		res, err := es.Cat.Indices(
+			es.Cat.Indices.WithContext(ctx),
+			es.Cat.Indices.WithFormat("json"),
+			es.Cat.Indices.WithH("index", "docs.count", "store.size", "health"),
+		)
+		if err != nil {
+			slog.Error("list indices error", "error", err)
+			return nil, nil, fmt.Errorf("list indices error: %w", err)
+		}
+		defer res.Body.Close()
+
+		var indices []map[string]interface{}
+		if err := json.NewDecoder(res.Body).Decode(&indices); err != nil {
+			slog.Error("failed to decode indices response", "error", err)
+			return nil, nil, fmt.Errorf("failed to decode indices response: %w", err)
+		}
+
+		slog.Info("list_indices result", "count", len(indices))
+		jsonOutput, _ := json.MarshalIndent(indices, "", "  ")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: string(jsonOutput)},
+			},
+		}, nil, nil
+	})
+
+	// 5b. Register Search Tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_elastic",
 		Description: "Search Elasticsearch with a JSON query string",
@@ -67,6 +124,8 @@ func main() {
 			args.Query = `{"query": {"match_all": {}}}`
 		}
 
+		slog.Info("search_elastic called", "index", args.Index, "query", args.Query)
+
 		// Perform the search
 		searchRes, err := es.Search(
 			es.Search.WithContext(ctx),
@@ -75,6 +134,7 @@ func main() {
 			es.Search.WithPretty(),
 		)
 		if err != nil {
+			slog.Error("search error", "error", err, "index", args.Index)
 			return nil, nil, fmt.Errorf("search error: %w", err)
 		}
 		defer searchRes.Body.Close()
@@ -82,8 +142,17 @@ func main() {
 		// Parse the result
 		var result map[string]interface{}
 		if err := json.NewDecoder(searchRes.Body).Decode(&result); err != nil {
+			slog.Error("failed to decode search response", "error", err)
 			return nil, nil, fmt.Errorf("failed to decode search response: %w", err)
 		}
+
+		// Log summary of results
+		took := result["took"]
+		hits, _ := result["hits"].(map[string]interface{})
+		total, _ := hits["total"].(map[string]interface{})
+		value := total["value"]
+
+		slog.Info("search_elastic result", "took", took, "hits", value)
 
 		// Return formatted result
 		jsonOutput, _ := json.MarshalIndent(result, "", "  ")
@@ -97,7 +166,9 @@ func main() {
 	})
 
 	// 6. Run Server over Stdio
+	slog.Info("Server listening on stdio")
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatal(err)
+		slog.Error("server run error", "error", err)
+		os.Exit(1)
 	}
 }
