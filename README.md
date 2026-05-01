@@ -53,9 +53,11 @@ Optional variables:
 
 - `ELASTIC_MODEL`: Default CLI model ID if you do not pass `--model`.
 - `ELASTIC_MCP_SERVER`: Path to the MCP server binary for the CLI and smoke-test client.
-- `MCP_LOG_FILE`: Log file path for either binary.
-- `MCP_LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Default is `info`.
-- `MCP_LOG_PAYLOADS`: Set to `true` to log full LLM request/response payloads. Default is off.
+- `CLIENT_LOG_FILE`: Log file path for the CLI. Default is `elastic-cli.log`.
+- `CLIENT_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` for the CLI. Default is `info`.
+- `CLIENT_LOG_PAYLOADS`: Set to `true` to log full CLI LLM request/response payloads. Default is off.
+- `SERVER_LOG_FILE`: Log file path for the MCP server. Default is `elastic-mcp-server.log`.
+- `SERVER_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` for the MCP server. Default is `info`.
 
 ## Usage
 
@@ -87,12 +89,12 @@ The server communicates over Standard Input/Output (stdio) and can be used with 
 ## Troubleshooting
 
 The CLI and Server log to files for debugging:
-- `elastic-cli.log`: Contains LLM interaction details and tool call logs.
-- `elastic-mcp-server.log`: Contains server-side logs and Elasticsearch interaction details.
+- `elastic-cli.log`: Contains CLI-side LLM interaction details and tool call logs (overridden by `CLIENT_LOG_FILE`).
+- `elastic-mcp-server.log`: Contains MCP server-side logs and Elasticsearch interaction details (overridden by `SERVER_LOG_FILE`).
 
-You can change the log file locations by setting `MCP_LOG_FILE`.
-Set `MCP_LOG_LEVEL=debug` for more detail.
-Set `MCP_LOG_PAYLOADS=true` only when you explicitly want full request/response payload logging.
+You can change the log file locations independently with `CLIENT_LOG_FILE` and `SERVER_LOG_FILE`.
+Set `CLIENT_LOG_LEVEL=debug` or `SERVER_LOG_LEVEL=debug` for more detail in the corresponding process.
+Set `CLIENT_LOG_PAYLOADS=true` only when you explicitly want full CLI request/response payload logging.
 
 ## Development
 

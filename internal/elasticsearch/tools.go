@@ -1,124 +1,29 @@
-package main
+package elasticsearch
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const maxLoggedBodyChars = 2048
-
-func logLevelFromEnv() slog.Level {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("MCP_LOG_LEVEL"))) {
-	case "", "info":
-		return slog.LevelInfo
-	case "debug":
-		return slog.LevelDebug
-	case "warn", "warning":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
+// Tool Arguments
+type ListIndicesArgs struct {
+	Pattern string `json:"pattern,omitempty" jsonschema:"Optional index pattern to filter by (e.g. logs-*)"`
 }
 
-func truncateForLog(s string, max int) string {
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	return s[:max] + "...(truncated)"
+type SearchArgs struct {
+	Index string `json:"index" jsonschema:"The index pattern to search (e.g. logs-* or .alerts-security.alerts-default)"`
+	Query string `json:"query" jsonschema:"The Elasticsearch JSON query DSL string"`
 }
 
-func httpError(method string, res *esapi.Response) error {
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("%s failed with status %s: reading error body: %w", method, res.Status(), err)
-	}
-	return fmt.Errorf("%s failed with status %s: %s", method, res.Status(), truncateForLog(strings.TrimSpace(string(body)), maxLoggedBodyChars))
-}
-
-func main() {
-	// 1. Logging Setup
-	logFile := os.Getenv("MCP_LOG_FILE")
-	if logFile == "" {
-		logFile = "elastic-mcp-server.log"
-	}
-
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
-		os.Exit(1)
-	}
-	defer f.Close()
-
-	// Initialize slog to write to the file so it doesn't corrupt stdio MCP transport
-	logger := slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{
-		Level: logLevelFromEnv(),
-	}))
-	slog.SetDefault(logger)
-
-	// 2. Environment Variables
-	elasticURL := os.Getenv("ELASTIC_URL")
-	elasticKey := os.Getenv("ELASTIC_KEY")
-
-	if elasticURL == "" || elasticKey == "" {
-		slog.Error("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
-		os.Exit(1)
-	}
-
-	// 2. Initialize Elasticsearch Client
-	cfg := elasticsearch.Config{
-		Addresses: []string{elasticURL},
-		APIKey:    elasticKey,
-	}
-	es, err := elasticsearch.NewClient(cfg)
-	if err != nil {
-		slog.Error("Error creating the elasticsearch client", "error", err)
-		os.Exit(1)
-	}
-
-	// Skip connectivity check in this version for simplicity,
-	// or make it optional. For now, let's keep it but handle it gracefully.
-	res, err := es.Info()
-	if err != nil {
-		slog.Warn("Could not connect to Elasticsearch", "error", err)
-	} else {
-		res.Body.Close()
-	}
-
-	slog.Info("Starting elastic-mcp-server", "url", elasticURL)
-
-	// 3. Create MCP Server
-	server := mcp.NewServer(
-		&mcp.Implementation{
-			Name:    "elastic-mcp-server",
-			Version: "1.0.0",
-		},
-		nil,
-	)
-
-	// 4. Define Tool Arguments
-	type ListIndicesArgs struct {
-		Pattern string `json:"pattern,omitempty" jsonschema:"Optional index pattern to filter by (e.g. logs-*)"`
-	}
-
-	type SearchArgs struct {
-		Index string `json:"index" jsonschema:"The index pattern to search (e.g. logs-* or .alerts-security.alerts-default)"`
-		Query string `json:"query" jsonschema:"The Elasticsearch JSON query DSL string"`
-	}
-
-	// 5a. Register List Indices Tool
+func RegisterTools(server *mcp.Server, es *elasticsearch.Client) {
+	// Register List Indices Tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_indices",
 		Description: "List all available Elasticsearch indices",
@@ -141,7 +46,7 @@ func main() {
 		}
 		defer res.Body.Close()
 		if res.IsError() {
-			err := httpError("cat indices", res)
+			err := HttpError("cat indices", res)
 			slog.Warn("list indices request failed", "error", err)
 			return nil, nil, err
 		}
@@ -164,7 +69,7 @@ func main() {
 		}, nil, nil
 	})
 
-	// 5b. Register Search Tool
+	// Register Search Tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_elastic",
 		Description: "Search Elasticsearch with a JSON query string",
@@ -190,7 +95,7 @@ func main() {
 		}
 		defer searchRes.Body.Close()
 		if searchRes.IsError() {
-			err := httpError("search", searchRes)
+			err := HttpError("search", searchRes)
 			slog.Warn("search request failed", "index", args.Index, "error", err)
 			return nil, nil, err
 		}
@@ -218,19 +123,8 @@ func main() {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
-					Text: string(jsonOutput),
-				},
+					Text: string(jsonOutput)},
 			},
 		}, nil, nil
 	})
-
-	// 6. Run Server over Stdio
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	slog.Info("Server listening on stdio")
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
-		slog.Error("server run error", "error", err)
-		os.Exit(1)
-	}
 }
