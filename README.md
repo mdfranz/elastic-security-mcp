@@ -4,12 +4,12 @@ An implementation of the [Model Context Protocol (MCP)](https://modelcontextprot
 
 ## Features
 
-- **list_indices**: Tool to see what indices are available in your Elasticsearch cluster.
+- **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
 - **search_elastic**: Tool to search Elasticsearch indices using the full Query DSL.
 
 ## Prerequisites
 
-- Go 1.24.2 or higher
+- Go 1.26.2 or higher
 - Access to an Elasticsearch cluster (URL and API Key)
 - Anthropic API Key (for the CLI)
 
