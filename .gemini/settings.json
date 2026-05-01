@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "elastic-security": {
+      "command": "go",
+      "args": [
+        "run",
+        "main.go"
+      ],
+      "env": {
+        "ELASTIC_URL": "${ELASTIC_URL}",
+        "ELASTIC_KEY": "${ELASTIC_KEY}"
+      }
+    }
+  }
+}
