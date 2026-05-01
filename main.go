@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -73,7 +74,9 @@ func main() {
 	)
 
 	// 4. Define Tool Arguments
-	type ListIndicesArgs struct{}
+	type ListIndicesArgs struct {
+		Pattern string `json:"pattern,omitempty" jsonschema:"Optional index pattern to filter by (e.g. logs-*)"`
+	}
 
 	type SearchArgs struct {
 		Index string `json:"index" jsonschema:"The index pattern to search (e.g. logs-* or .alerts-security.alerts-default)"`
@@ -85,12 +88,18 @@ func main() {
 		Name:        "list_indices",
 		Description: "List all available Elasticsearch indices",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
-		slog.Info("list_indices called")
-		res, err := es.Cat.Indices(
+		slog.Info("list_indices called", "pattern", args.Pattern)
+		
+		opts := []func(*esapi.CatIndicesRequest){
 			es.Cat.Indices.WithContext(ctx),
 			es.Cat.Indices.WithFormat("json"),
 			es.Cat.Indices.WithH("index", "docs.count", "store.size", "health"),
-		)
+		}
+		if args.Pattern != "" {
+			opts = append(opts, es.Cat.Indices.WithIndex(args.Pattern))
+		}
+
+		res, err := es.Cat.Indices(opts...)
 		if err != nil {
 			slog.Error("list indices error", "error", err)
 			return nil, nil, fmt.Errorf("list indices error: %w", err)
