@@ -7,6 +7,18 @@ An implementation of the [Model Context Protocol (MCP)](https://modelcontextprot
 - **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
 - **search_elastic**: Tool to search Elasticsearch indices using the full Query DSL.
 
+## Key Libraries
+
+This project leverages several powerful libraries:
+
+- [**Elasticsearch Go Client**](https://github.com/elastic/go-elasticsearch): The official Go client for Elasticsearch.
+- [**Model Context Protocol (MCP) SDK**](https://github.com/modelcontextprotocol/go-sdk): SDK for building MCP servers and clients.
+- [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
+- [**Lip Gloss**](https://github.com/charmbracelet/lipgloss): Style and layout primitives for the terminal.
+- [**LangChainGo**](https://github.com/tmc/langchaingo): A framework for building LLM-powered applications in Go.
+- [**Cobra**](https://github.com/spf13/cobra): A library for creating powerful modern CLI applications.
+- [**Glamour**](https://github.com/charmbracelet/glamour): Markdown rendering for the terminal.
+
 ## Prerequisites
 
 - Go 1.26.2 or higher
