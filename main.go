@@ -89,7 +89,7 @@ func main() {
 		Description: "List all available Elasticsearch indices",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
 		slog.Info("list_indices called", "pattern", args.Pattern)
-		
+
 		opts := []func(*esapi.CatIndicesRequest){
 			es.Cat.Indices.WithContext(ctx),
 			es.Cat.Indices.WithFormat("json"),
