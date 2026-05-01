@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,9 +23,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/llms/googleai"
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/memory"
+	"google.golang.org/api/googleapi"
 )
 
 const systemPrompt = `You are a silent Elastic Security analyst tool.
@@ -234,6 +237,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			assistantParts = append(assistantParts, llms.TextContent{Text: choice.Content})
 		}
 		for i := range choice.ToolCalls {
+			// Normalize tool calls for Gemini/etc. if IDs are missing
+			// Gemini often requires hexadecimal IDs
+			if choice.ToolCalls[i].ID == "" {
+				b := make([]byte, 8)
+				rand.Read(b)
+				choice.ToolCalls[i].ID = hex.EncodeToString(b)
+			}
+			if choice.ToolCalls[i].Type == "" {
+				choice.ToolCalls[i].Type = "tool_call"
+			}
 			assistantParts = append(assistantParts, choice.ToolCalls[i])
 		}
 		m.history = append(m.history, llms.MessageContent{
@@ -327,15 +340,99 @@ func (m model) View() string {
 	return s
 }
 
+func truncateForLog(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "...(truncated)"
+}
+
+func summarizeHistoryForLog(history []llms.MessageContent) string {
+	type partSummary map[string]any
+	type messageSummary map[string]any
+
+	summary := make([]messageSummary, 0, len(history))
+	for i, msg := range history {
+		parts := make([]partSummary, 0, len(msg.Parts))
+		for _, part := range msg.Parts {
+			switch p := part.(type) {
+			case llms.TextContent:
+				parts = append(parts, partSummary{
+					"type":    "text",
+					"chars":   len(p.Text),
+					"preview": truncateForLog(p.Text, 160),
+				})
+			case llms.ToolCall:
+				parts = append(parts, partSummary{
+					"type":      "tool_call",
+					"name":      p.FunctionCall.Name,
+					"id":        p.ID,
+					"arg_chars": len(p.FunctionCall.Arguments),
+					"args":      truncateForLog(p.FunctionCall.Arguments, 240),
+				})
+			case llms.ToolCallResponse:
+				parts = append(parts, partSummary{
+					"type":         "tool_response",
+					"name":         p.Name,
+					"tool_call_id": p.ToolCallID,
+					"chars":        len(p.Content),
+					"preview":      truncateForLog(p.Content, 240),
+				})
+			default:
+				parts = append(parts, partSummary{
+					"type": fmt.Sprintf("%T", part),
+				})
+			}
+		}
+		summary = append(summary, messageSummary{
+			"index": i,
+			"role":  msg.Role,
+			"parts": parts,
+		})
+	}
+
+	b, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Sprintf("failed to summarize history: %v", err)
+	}
+	return string(b)
+}
+
 func (m model) generateResponse() tea.Cmd {
 	return func() tea.Msg {
+		// Log the history being sent
+		histJSON, _ := json.Marshal(m.history)
+		slog.Debug("Sending history to LLM", "history", string(histJSON))
+		slog.Debug("LLM request summary",
+			"model", m.modelName,
+			"tool_count", len(m.lcTools),
+			"message_count", len(m.history),
+			"summary", summarizeHistoryForLog(m.history),
+		)
+
 		resp, err := m.llmClient.GenerateContent(context.Background(), m.history,
 			llms.WithTools(m.lcTools),
 			llms.WithMaxTokens(4096),
 		)
 		if err != nil {
+			var gerr *googleapi.Error
+			if errors.As(err, &gerr) {
+				slog.Error("Google API generation error details",
+					"model", m.modelName,
+					"status_code", gerr.Code,
+					"message", gerr.Message,
+					"body", gerr.Body,
+					"details", fmt.Sprintf("%v", gerr.Details),
+					"headers", fmt.Sprintf("%v", gerr.Header),
+				)
+			}
+			slog.Error("LLM generation error", "error", err)
 			return errMsg{err}
 		}
+
+		respJSON, _ := json.Marshal(resp)
+		slog.Debug("Received LLM response", "response", string(respJSON))
+
 		return llmResponseMsg{resp}
 	}
 }
@@ -344,6 +441,8 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		toolResultParts := []llms.ContentPart{}
 		for _, tc := range toolCalls {
+			slog.Info("Executing tool", "name", tc.FunctionCall.Name, "args", tc.FunctionCall.Arguments, "id", tc.ID)
+
 			var args map[string]any
 			if err := json.Unmarshal([]byte(tc.FunctionCall.Arguments), &args); err != nil {
 				args = map[string]any{}
@@ -357,8 +456,10 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 			var resultText string
 			switch {
 			case err != nil:
+				slog.Error("Tool call error", "name", tc.FunctionCall.Name, "error", err)
 				resultText = fmt.Sprintf("error calling tool: %v", err)
 			case toolResp.IsError:
+				slog.Warn("Tool returned error status", "name", tc.FunctionCall.Name)
 				resultText = "tool returned an error"
 			default:
 				var sb strings.Builder
@@ -368,6 +469,11 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 					}
 				}
 				resultText = sb.String()
+				slog.Debug("Tool execution successful",
+					"name", tc.FunctionCall.Name,
+					"result_len", len(resultText),
+					"result_preview", truncateForLog(resultText, 500),
+				)
 			}
 
 			toolResultParts = append(toolResultParts, llms.ToolCallResponse{
@@ -594,7 +700,7 @@ func runApp(modelFlag string) {
 	case strings.HasPrefix(modelName, "claude-"):
 		llmClient, err = anthropic.New(anthropic.WithModel(modelName))
 	case strings.HasPrefix(modelName, "gemini-"):
-		llmClient, err = googleai.New(ctx, googleai.WithAPIKey(geminiKey), googleai.WithDefaultModel(modelName))
+		llmClient = newGeminiModel(geminiKey, modelName, nil)
 	default:
 		// Fallback to OpenAI if unknown
 		llmClient, err = openai.New(openai.WithModel(modelName))
