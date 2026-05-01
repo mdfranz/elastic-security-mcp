@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -35,6 +37,32 @@ NEVER say "I will search" or "Let me check" or "Now I'll".
 IF YOU NEED DATA, CALL search_elastic OR list_indices IMMEDIATELY.
 DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
 ALWAYS use Markdown tables for tabular data.`
+
+const maxLoggedPayloadChars = 4000
+
+func logLevelFromEnv() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MCP_LOG_LEVEL"))) {
+	case "", "info":
+		return slog.LevelInfo
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func payloadLoggingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MCP_LOG_PAYLOADS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // Styles
 var (
@@ -78,6 +106,7 @@ type errMsg struct {
 }
 
 type model struct {
+	ctx        context.Context
 	mcpSession *mcp.ClientSession
 	llmClient  llms.Model
 	lcTools    []llms.Tool
@@ -121,6 +150,7 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.M
 	)
 
 	return model{
+		ctx:        ctx,
 		mcpSession: session,
 		llmClient:  client,
 		lcTools:    tools,
@@ -170,7 +200,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Handle /memory command
 			if input == "/memory" {
 				m.textInput.SetValue("")
-				vars, err := m.mem.LoadMemoryVariables(context.Background(), nil)
+				vars, err := m.mem.LoadMemoryVariables(m.ctx, nil)
 				if err != nil {
 					m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Memory error: %v", err)))
 				} else {
@@ -229,6 +259,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spCmd
 
 	case llmResponseMsg:
+		if msg.resp == nil || len(msg.resp.Choices) == 0 {
+			m.err = errors.New("LLM returned no choices")
+			m.isThinking = false
+			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			m.viewport.SetContent(strings.Join(m.messages, "\n"))
+			m.viewport.GotoBottom()
+			return m, nil
+		}
+
 		choice := msg.resp.Choices[0]
 
 		// Add assistant turn to history
@@ -241,7 +280,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Gemini often requires hexadecimal IDs
 			if choice.ToolCalls[i].ID == "" {
 				b := make([]byte, 8)
-				rand.Read(b)
+				if _, err := rand.Read(b); err != nil {
+					m.err = fmt.Errorf("failed to create tool call ID: %w", err)
+					m.isThinking = false
+					m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+					m.viewport.SetContent(strings.Join(m.messages, "\n"))
+					m.viewport.GotoBottom()
+					return m, nil
+				}
 				choice.ToolCalls[i].ID = hex.EncodeToString(b)
 			}
 			if choice.ToolCalls[i].Type == "" {
@@ -280,7 +326,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle tool calls
 		if len(choice.ToolCalls) > 0 {
 			for _, tc := range choice.ToolCalls {
-				m.messages = append(m.messages, toolStyle.Copy().Width(m.viewport.Width-4).Render(fmt.Sprintf("  [%s] args: %s", tc.FunctionCall.Name, tc.FunctionCall.Arguments)))
+				m.messages = append(m.messages, toolStyle.Copy().Width(m.viewport.Width-4).Render(fmt.Sprintf("  [%s] args: %s", toolCallName(tc), toolCallArguments(tc))))
 			}
 			m.viewport.SetContent(strings.Join(m.messages, "\n"))
 			m.viewport.GotoBottom()
@@ -289,7 +335,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Done — save completed turn to LangChain memory
 		if m.lastInput != "" {
-			_ = m.mem.SaveContext(context.Background(),
+			_ = m.mem.SaveContext(m.ctx,
 				map[string]any{"input": m.lastInput},
 				map[string]any{"output": choice.Content},
 			)
@@ -347,6 +393,39 @@ func truncateForLog(s string, max int) string {
 	return s[:max] + "...(truncated)"
 }
 
+func toolCallName(tc llms.ToolCall) string {
+	if tc.FunctionCall == nil || tc.FunctionCall.Name == "" {
+		return "(missing)"
+	}
+	return tc.FunctionCall.Name
+}
+
+func toolCallArguments(tc llms.ToolCall) string {
+	if tc.FunctionCall == nil {
+		return "{}"
+	}
+	if strings.TrimSpace(tc.FunctionCall.Arguments) == "" {
+		return "{}"
+	}
+	return tc.FunctionCall.Arguments
+}
+
+func extractToolContent(toolResp *mcp.CallToolResult) string {
+	if toolResp == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range toolResp.Content {
+		if txt, ok := c.(*mcp.TextContent); ok {
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(txt.Text)
+		}
+	}
+	return sb.String()
+}
+
 func summarizeHistoryForLog(history []llms.MessageContent) string {
 	type partSummary map[string]any
 	type messageSummary map[string]any
@@ -365,10 +444,10 @@ func summarizeHistoryForLog(history []llms.MessageContent) string {
 			case llms.ToolCall:
 				parts = append(parts, partSummary{
 					"type":      "tool_call",
-					"name":      p.FunctionCall.Name,
+					"name":      toolCallName(p),
 					"id":        p.ID,
-					"arg_chars": len(p.FunctionCall.Arguments),
-					"args":      truncateForLog(p.FunctionCall.Arguments, 240),
+					"arg_chars": len(toolCallArguments(p)),
+					"args":      truncateForLog(toolCallArguments(p), 240),
 				})
 			case llms.ToolCallResponse:
 				parts = append(parts, partSummary{
@@ -400,38 +479,52 @@ func summarizeHistoryForLog(history []llms.MessageContent) string {
 
 func (m model) generateResponse() tea.Cmd {
 	return func() tea.Msg {
-		// Log the history being sent
-		histJSON, _ := json.Marshal(m.history)
-		slog.Debug("Sending history to LLM", "history", string(histJSON))
 		slog.Debug("LLM request summary",
 			"model", m.modelName,
 			"tool_count", len(m.lcTools),
 			"message_count", len(m.history),
 			"summary", summarizeHistoryForLog(m.history),
 		)
+		if payloadLoggingEnabled() {
+			histJSON, err := json.Marshal(m.history)
+			if err == nil {
+				slog.Debug("Sending history to LLM", "history", truncateForLog(string(histJSON), maxLoggedPayloadChars))
+			}
+		}
 
-		resp, err := m.llmClient.GenerateContent(context.Background(), m.history,
+		resp, err := m.llmClient.GenerateContent(m.ctx, m.history,
 			llms.WithTools(m.lcTools),
 			llms.WithMaxTokens(4096),
 		)
 		if err != nil {
 			var gerr *googleapi.Error
 			if errors.As(err, &gerr) {
-				slog.Error("Google API generation error details",
+				logAttrs := []any{
 					"model", m.modelName,
 					"status_code", gerr.Code,
 					"message", gerr.Message,
-					"body", gerr.Body,
-					"details", fmt.Sprintf("%v", gerr.Details),
-					"headers", fmt.Sprintf("%v", gerr.Header),
+				}
+				if payloadLoggingEnabled() {
+					logAttrs = append(logAttrs,
+						"body", truncateForLog(gerr.Body, maxLoggedPayloadChars),
+						"details", fmt.Sprintf("%v", gerr.Details),
+						"headers", fmt.Sprintf("%v", gerr.Header),
+					)
+				}
+				slog.Error("Google API generation error details",
+					logAttrs...,
 				)
 			}
 			slog.Error("LLM generation error", "error", err)
 			return errMsg{err}
 		}
 
-		respJSON, _ := json.Marshal(resp)
-		slog.Debug("Received LLM response", "response", string(respJSON))
+		if payloadLoggingEnabled() {
+			respJSON, err := json.Marshal(resp)
+			if err == nil {
+				slog.Debug("Received LLM response", "response", truncateForLog(string(respJSON), maxLoggedPayloadChars))
+			}
+		}
 
 		return llmResponseMsg{resp}
 	}
@@ -441,14 +534,33 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		toolResultParts := []llms.ContentPart{}
 		for _, tc := range toolCalls {
-			slog.Info("Executing tool", "name", tc.FunctionCall.Name, "args", tc.FunctionCall.Arguments, "id", tc.ID)
-
-			var args map[string]any
-			if err := json.Unmarshal([]byte(tc.FunctionCall.Arguments), &args); err != nil {
-				args = map[string]any{}
+			name := toolCallName(tc)
+			argsJSON := toolCallArguments(tc)
+			slog.Info("Executing tool", "name", name, "arg_chars", len(argsJSON), "id", tc.ID)
+			if payloadLoggingEnabled() {
+				slog.Debug("Tool arguments", "name", name, "args", truncateForLog(argsJSON, maxLoggedPayloadChars))
 			}
 
-			toolResp, err := m.mcpSession.CallTool(context.Background(), &mcp.CallToolParams{
+			if tc.FunctionCall == nil || tc.FunctionCall.Name == "" {
+				toolResultParts = append(toolResultParts, llms.ToolCallResponse{
+					ToolCallID: tc.ID,
+					Name:       name,
+					Content:    "invalid tool call: missing function name",
+				})
+				continue
+			}
+
+			var args map[string]any
+			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+				toolResultParts = append(toolResultParts, llms.ToolCallResponse{
+					ToolCallID: tc.ID,
+					Name:       tc.FunctionCall.Name,
+					Content:    fmt.Sprintf("invalid tool arguments: %v", err),
+				})
+				continue
+			}
+
+			toolResp, err := m.mcpSession.CallTool(m.ctx, &mcp.CallToolParams{
 				Name:      tc.FunctionCall.Name,
 				Arguments: args,
 			})
@@ -459,16 +571,16 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 				slog.Error("Tool call error", "name", tc.FunctionCall.Name, "error", err)
 				resultText = fmt.Sprintf("error calling tool: %v", err)
 			case toolResp.IsError:
-				slog.Warn("Tool returned error status", "name", tc.FunctionCall.Name)
-				resultText = "tool returned an error"
-			default:
-				var sb strings.Builder
-				for _, c := range toolResp.Content {
-					if txt, ok := c.(*mcp.TextContent); ok {
-						sb.WriteString(txt.Text)
-					}
+				resultText = extractToolContent(toolResp)
+				if strings.TrimSpace(resultText) == "" {
+					resultText = "tool returned an error"
 				}
-				resultText = sb.String()
+				slog.Warn("Tool returned error status",
+					"name", tc.FunctionCall.Name,
+					"error_preview", truncateForLog(resultText, 500),
+				)
+			default:
+				resultText = extractToolContent(toolResp)
 				slog.Debug("Tool execution successful",
 					"name", tc.FunctionCall.Name,
 					"result_len", len(resultText),
@@ -536,6 +648,19 @@ func (m modelSelector) View() string {
 	return "\n" + m.list.View()
 }
 
+func modelProvider(modelName string) string {
+	switch {
+	case strings.HasPrefix(modelName, "gpt-"), strings.HasPrefix(modelName, "o1-"), strings.HasPrefix(modelName, "o3-"):
+		return "openai"
+	case strings.HasPrefix(modelName, "claude-"):
+		return "anthropic"
+	case strings.HasPrefix(modelName, "gemini-"):
+		return "gemini"
+	default:
+		return ""
+	}
+}
+
 func main() {
 	var modelFlag string
 
@@ -569,10 +694,11 @@ func runApp(modelFlag string) {
 	}
 	defer f.Close()
 
-	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: logLevelFromEnv()}))
 	slog.SetDefault(logger)
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// Server path
 	serverPath := os.Getenv("ELASTIC_MCP_SERVER")
@@ -694,16 +820,28 @@ func runApp(modelFlag string) {
 	}
 
 	modelName = elasticModel
-	switch {
-	case strings.HasPrefix(modelName, "gpt-") || strings.HasPrefix(modelName, "o1-"):
+	switch modelProvider(modelName) {
+	case "openai":
+		if openaiKey == "" {
+			slog.Error("OPENAI_API_KEY is required for the selected model", "model", modelName)
+			os.Exit(1)
+		}
 		llmClient, err = openai.New(openai.WithModel(modelName))
-	case strings.HasPrefix(modelName, "claude-"):
+	case "anthropic":
+		if anthropicKey == "" {
+			slog.Error("ANTHROPIC_API_KEY is required for the selected model", "model", modelName)
+			os.Exit(1)
+		}
 		llmClient, err = anthropic.New(anthropic.WithModel(modelName))
-	case strings.HasPrefix(modelName, "gemini-"):
+	case "gemini":
+		if geminiKey == "" {
+			slog.Error("GEMINI_API_KEY is required for the selected model", "model", modelName)
+			os.Exit(1)
+		}
 		llmClient = newGeminiModel(geminiKey, modelName, nil)
 	default:
-		// Fallback to OpenAI if unknown
-		llmClient, err = openai.New(openai.WithModel(modelName))
+		slog.Error("Unsupported model prefix", "model", modelName)
+		os.Exit(1)
 	}
 
 	if err != nil {
