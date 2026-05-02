@@ -1,0 +1,13 @@
+#!/bin/bash
+
+
+export CLIENT_LOG_LEVEL=debug
+export CLIENT_LOG_PAYLOADS=true
+export SERVER_LOG_LEVEL=debug
+export CACHE_ENABLED=true
+
+echo "Debug environment variables set:"
+echo "CLIENT_LOG_LEVEL=$CLIENT_LOG_LEVEL"
+echo "CLIENT_LOG_PAYLOADS=$CLIENT_LOG_PAYLOADS"
+echo "SERVER_LOG_LEVEL=$SERVER_LOG_LEVEL"
+echo "CACHE_ENABLED=$CACHE_ENABLED"
