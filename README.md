@@ -2,7 +2,30 @@
 
 An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases with optional local Redis caching to reduce upstream lookups.
 
+<<<<<<< Updated upstream
 This can be used with coding agents (only Gemini has been tested) or the the cli in this project. 
+=======
+If you prefer a browser-based interface that maintains the same "security terminal" aesthetic:
+
+```bash
+./elastic-cli --webui --port 8080
+```
+
+Open `http://localhost:8080` in your browser to start.
+
+The Web UI provides a specialized workspace for security investigations:
+
+- **Interactive Security Console**: A modern, responsive interface designed for deep-dive security analysis.
+- **Dual-Panel Workspace**:
+    - **Investigation Feed**: A real-time conversation stream with the AI analyst. Includes full Markdown support for high-quality reports, data tables, and formatted analysis.
+    - **Execution Trace (Tool Activity)**: A dedicated sidebar that provides visibility into the agent's thought process. Monitor tool calls as they happen, with expandable cards showing input arguments and raw output results.
+- **Real-time Feedback**: Powered by WebSockets to provide immediate updates on tool progress ("Analyzing request", "Running search_security_events", etc.) and streaming responses.
+- **Command History**: Efficiently navigate previous queries using `Up/Down` arrow keys, with history persisted across browser sessions.
+- **Session Management**: Quickly clear context and start fresh investigations with a single click.
+- **Export to Markdown**: Save your entire investigation, including both your queries and the AI's analysis, as a formatted Markdown file for easy documentation or reporting.
+- **Agentic Intelligence**: The same powerful security analyst from the CLI, tuned to prefer structured tools like `search_security_events` for accurate data retrieval.
+
+>>>>>>> Stashed changes
 
 ## Elastic Security Assistant (CLI)
 
@@ -14,8 +37,15 @@ The project includes a powerful, agentic CLI that acts as a security analyst ass
 - **Conversation Memory**: Built-in context management for long-running investigations (type `/memory` to view).
 - **One-Shot Execution**: Run quick queries and exit using the `--prompt` or `-p` flag.
 - **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
+<<<<<<< Updated upstream
 
 ## Server Tools
+=======
+- **Optional Web UI**: Use the `--webui` flag to start a local web server with a similar look and feel to the terminal experience.
+
+
+## MCP Server Tools
+>>>>>>> Stashed changes
 
 The MCP server provides the following tools to any compatible host:
 
@@ -37,6 +67,8 @@ This project leverages several powerful libraries:
 - [**LangChainGo**](https://github.com/tmc/langchaingo): A framework for building LLM-powered applications in Go.
 - [**Cobra**](https://github.com/spf13/cobra): A library for creating powerful modern CLI applications.
 - [**Glamour**](https://github.com/charmbracelet/glamour): Markdown rendering for the terminal.
+
+see [PKG.md](PKG.md) for detailed list.
 
 ## Prerequisites
 
@@ -105,8 +137,11 @@ You can also pick a model explicitly:
 ./elastic-cli --model gpt-5
 ```
 
+<<<<<<< Updated upstream
 The CLI is tuned to prefer `search_security_events` for typical investigations and only fall back to `search_elastic` when raw DSL control is required.
 
+=======
+>>>>>>> Stashed changes
 ### Running the server standalone
 
 The server communicates over Standard Input/Output (stdio) and can be used with any MCP host.
