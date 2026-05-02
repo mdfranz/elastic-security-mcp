@@ -5,7 +5,8 @@ An implementation of the [Model Context Protocol (MCP)](https://modelcontextprot
 ## Features
 
 - **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
-- **search_elastic**: Tool to search Elasticsearch indices using the full Query DSL.
+- **search_security_events**: Structured, snippets-first search for ECS-style Zeek and Suricata data with typed filters, boosted network fields, and highlighting.
+- **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries.
 
 ## Key Libraries
 
@@ -58,6 +59,10 @@ Optional variables:
 - `CLIENT_LOG_PAYLOADS`: Set to `true` to log full CLI LLM request/response payloads. Default is off.
 - `SERVER_LOG_FILE`: Log file path for the MCP server. Default is `elastic-mcp-server.log`.
 - `SERVER_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` for the MCP server. Default is `info`.
+- `CACHE_SEARCH_SECURITY_EVENTS_TTL`: Cache TTL in seconds for `search_security_events`. Default is `60`.
+- `CACHE_SEARCH_ELASTIC_TTL`: Cache TTL in seconds for `search_elastic`. Default is `60`.
+- `CACHE_LIST_INDICES_TTL`: Cache TTL in seconds for `list_indices`. Default is `300`.
+- `MAX_RESPONSE_CHARS`: Maximum JSON response size returned by search tools before truncation. Default is `50000`.
 
 ## Usage
 
@@ -77,6 +82,8 @@ You can also pick a model explicitly:
 ```bash
 ./elastic-cli --model gpt-5
 ```
+
+The CLI is tuned to prefer `search_security_events` for typical investigations and only fall back to `search_elastic` when raw DSL control is required.
 
 ### Running the server standalone
 

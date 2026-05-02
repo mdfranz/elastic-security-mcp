@@ -48,7 +48,7 @@ func main() {
 
 	// Skip connectivity check in this version for simplicity,
 	// or make it optional. For now, let's keep it but handle it gracefully.
-	res, err := es.Info()
+	res, err := es.Raw.Info()
 	if err != nil {
 		slog.Warn("Could not connect to Elasticsearch", "error", err)
 	} else {

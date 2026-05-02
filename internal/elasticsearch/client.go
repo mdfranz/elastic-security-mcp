@@ -5,19 +5,35 @@ import (
 	"io"
 	"strings"
 
-	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/elastic/go-elasticsearch/v8/esapi"
+	"github.com/elastic/go-elasticsearch/v9"
+	"github.com/elastic/go-elasticsearch/v9/esapi"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 )
 
 const maxLoggedBodyChars = 2048
 
-func NewClient(url, apiKey string) (*elasticsearch.Client, error) {
+type Client struct {
+	Raw   *elasticsearch.Client
+	Typed *elasticsearch.TypedClient
+}
+
+func NewClient(url, apiKey string) (*Client, error) {
 	cfg := elasticsearch.Config{
 		Addresses: []string{url},
 		APIKey:    apiKey,
 	}
-	return elasticsearch.NewClient(cfg)
+	raw, err := elasticsearch.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	typed, err := elasticsearch.NewTypedClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		Raw:   raw,
+		Typed: typed,
+	}, nil
 }
 
 func HttpError(method string, res *esapi.Response) error {

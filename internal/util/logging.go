@@ -3,12 +3,14 @@ package util
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 const (
-	DefaultClientLogFile = "elastic-cli.log"
-	DefaultServerLogFile = "elastic-mcp-server.log"
+	DefaultClientLogFile     = "elastic-cli.log"
+	DefaultServerLogFile     = "elastic-mcp-server.log"
+	DefaultClientHistoryFile = ".elastic-cli-history"
 )
 
 func ClientLogFile() string {
@@ -23,6 +25,16 @@ func ServerLogFile() string {
 		return logFile
 	}
 	return DefaultServerLogFile
+}
+
+func ClientHistoryFile() string {
+	if histFile := strings.TrimSpace(os.Getenv("CLIENT_HISTORY_FILE")); histFile != "" {
+		return histFile
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, DefaultClientHistoryFile)
+	}
+	return DefaultClientHistoryFile
 }
 
 func ClientLogLevel() slog.Level {

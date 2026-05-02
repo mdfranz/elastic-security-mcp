@@ -36,7 +36,8 @@ const systemPrompt = `You are a silent Elastic Security analyst tool.
 YOUR ONLY JOB IS TO CALL TOOLS.
 NEVER explain what you are doing.
 NEVER say "I will search" or "Let me check" or "Now I'll".
-IF YOU NEED DATA, CALL search_elastic OR list_indices IMMEDIATELY.
+IF YOU NEED DATA, CALL search_security_events OR list_indices IMMEDIATELY.
+USE search_elastic ONLY WHEN YOU NEED RAW ELASTICSEARCH JSON DSL THAT search_security_events CANNOT EXPRESS.
 DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
 ALWAYS use Markdown tables for tabular data.`
 
@@ -61,6 +62,10 @@ var (
 			Foreground(lipgloss.Color("#878787")).
 			Italic(true)
 
+	statusStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#B85F00"))
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF0000"))
 
@@ -83,6 +88,13 @@ type errMsg struct {
 	err error
 }
 
+type focusArea int
+
+const (
+	focusInput focusArea = iota
+	focusOutput
+)
+
 type model struct {
 	ctx        context.Context
 	mcpSession *mcp.ClientSession
@@ -93,22 +105,27 @@ type model struct {
 	mem        *memory.ConversationBuffer
 	useMemory  bool
 	lastInput  string
+	inputHist  []string
+	histIndex  int
+	histDraft  string
 
 	viewport  viewport.Model
 	textInput textinput.Model
 	spinner   spinner.Model
 	renderer  *glamour.TermRenderer
 	isDark    bool
+	focus     focusArea
 
 	messages   []string
 	isThinking bool
+	statusText string
 	err        error
 	ready      bool
 }
 
 func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.Model, tools []llms.Tool, modelName string, useMemory bool) model {
 	ti := textinput.New()
-	ti.Placeholder = "Ask about security data..."
+	ti.Placeholder = "Ask about security data... (Up/Down history, PgUp/PgDn scroll)"
 	ti.Focus()
 	ti.CharLimit = 1024
 	ti.Width = 80
@@ -136,10 +153,13 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.M
 		modelName:  modelName,
 		mem:        memory.NewConversationBuffer(),
 		useMemory:  useMemory,
+		inputHist:  loadHistory(),
+		histIndex:  -1,
 		textInput:  ti,
 		spinner:    s,
 		renderer:   renderer,
 		isDark:     isDark,
+		focus:      focusInput,
 		history: []llms.MessageContent{
 			{
 				Role:  llms.ChatMessageTypeSystem,
@@ -158,6 +178,88 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.spinner.Tick)
 }
 
+func (m *model) refreshViewport(follow bool) {
+	if !m.ready {
+		return
+	}
+	shouldFollow := follow || m.viewport.AtBottom()
+	m.viewport.SetContent(strings.Join(m.messages, "\n"))
+	if shouldFollow {
+		m.viewport.GotoBottom()
+	}
+}
+
+func summarizeToolCalls(toolCalls []llms.ToolCall) string {
+	if len(toolCalls) == 0 {
+		return "Waiting for assistant response..."
+	}
+
+	names := make([]string, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		name := toolCallName(tc)
+		if name == "(missing)" {
+			continue
+		}
+		names = append(names, name)
+	}
+
+	switch len(names) {
+	case 0:
+		return fmt.Sprintf("Running %d tool call(s)...", len(toolCalls))
+	case 1:
+		return fmt.Sprintf("Running `%s`...", names[0])
+	case 2:
+		return fmt.Sprintf("Running `%s` and `%s`...", names[0], names[1])
+	default:
+		return fmt.Sprintf("Running %d tool calls (%s, %s, ...)...", len(names), names[0], names[1])
+	}
+}
+
+func (m *model) pushInputHistory(input string) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return
+	}
+	if n := len(m.inputHist); n > 0 && m.inputHist[n-1] == input {
+		m.histIndex = -1
+		m.histDraft = ""
+		return
+	}
+	m.inputHist = append(m.inputHist, input)
+	saveHistory(input)
+	m.histIndex = -1
+	m.histDraft = ""
+}
+
+func (m *model) browseHistory(delta int) {
+	if len(m.inputHist) == 0 {
+		return
+	}
+
+	if m.histIndex == -1 {
+		m.histDraft = m.textInput.Value()
+		if delta < 0 {
+			m.histIndex = len(m.inputHist) - 1
+		} else {
+			return
+		}
+	} else {
+		m.histIndex += delta
+		if m.histIndex < 0 {
+			m.histIndex = 0
+		}
+		if m.histIndex >= len(m.inputHist) {
+			m.histIndex = -1
+			m.textInput.SetValue(m.histDraft)
+			m.textInput.SetCursor(len([]rune(m.histDraft)))
+			return
+		}
+	}
+
+	m.textInput.SetValue(m.inputHist[m.histIndex])
+	m.textInput.SetCursor(len([]rune(m.inputHist[m.histIndex])))
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
@@ -168,10 +270,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyEsc:
 			return m, tea.Quit
 
+		case tea.KeyTab:
+			if m.focus == focusInput {
+				m.focus = focusOutput
+				m.textInput.Blur()
+			} else {
+				m.focus = focusInput
+				m.textInput.Focus()
+			}
+			return m, nil
+
+		case tea.KeyUp:
+			if m.focus == focusInput {
+				m.browseHistory(-1)
+			} else {
+				m.viewport.LineUp(1)
+			}
+			return m, nil
+
+		case tea.KeyDown:
+			if m.focus == focusInput {
+				m.browseHistory(1)
+			} else {
+				m.viewport.LineDown(1)
+			}
+			return m, nil
+
+		case tea.KeyPgUp:
+			m.viewport.HalfViewUp()
+			return m, nil
+
+		case tea.KeyPgDown:
+			m.viewport.HalfViewDown()
+			return m, nil
+
 		case tea.KeyEnter:
+			if m.focus != focusInput {
+				return m, nil
+			}
 			input := m.textInput.Value()
 			if input == "" {
 				return m, nil
@@ -179,6 +318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Handle /memory command
 			if input == "/memory" {
+				m.pushInputHistory(input)
 				m.textInput.SetValue("")
 				if !m.useMemory {
 					m.messages = append(m.messages, systemStyle.Render("Conversation memory is disabled."))
@@ -194,8 +334,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Conversation Memory:"), hist))
 					}
 				}
-				m.viewport.SetContent(strings.Join(m.messages, "\n"))
-				m.viewport.GotoBottom()
+				m.refreshViewport(true)
 				return m, nil
 			}
 
@@ -212,24 +351,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Parts: []llms.ContentPart{llms.TextContent{Text: input}},
 			})
 
+			m.pushInputHistory(input)
 			m.lastInput = input
 			m.textInput.SetValue("")
 			m.isThinking = true
-			m.viewport.SetContent(strings.Join(m.messages, "\n"))
-			m.viewport.GotoBottom()
+			m.statusText = "Analyzing request..."
+			m.refreshViewport(true)
 
 			return m, m.generateResponse()
 		}
 
 	case tea.WindowSizeMsg:
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, msg.Height-4)
+			m.viewport = viewport.New(msg.Width, msg.Height-8)
 			m.viewport.HighPerformanceRendering = false
 			m.viewport.SetContent(strings.Join(m.messages, "\n"))
 			m.ready = true
 		} else {
 			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - 4
+			m.viewport.Height = msg.Height - 8
 		}
 		// Update renderer width without re-querying terminal
 		style := "light"
@@ -250,9 +390,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.resp == nil || len(msg.resp.Choices) == 0 {
 			m.err = errors.New("LLM returned no choices")
 			m.isThinking = false
+			m.statusText = ""
 			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-			m.viewport.SetContent(strings.Join(m.messages, "\n"))
-			m.viewport.GotoBottom()
+			m.refreshViewport(false)
 			return m, nil
 		}
 
@@ -272,9 +412,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if _, err := rand.Read(b); err != nil {
 					m.err = fmt.Errorf("failed to create tool call ID: %w", err)
 					m.isThinking = false
+					m.statusText = ""
 					m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-					m.viewport.SetContent(strings.Join(m.messages, "\n"))
-					m.viewport.GotoBottom()
+					m.refreshViewport(false)
 					return m, nil
 				}
 				choice.ToolCalls[i].ID = hex.EncodeToString(b)
@@ -304,7 +444,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Display content if any
-		if choice.Content != "" {
+		if choice.Content != "" && len(choice.ToolCalls) == 0 {
 			rendered, err := m.renderer.Render(choice.Content)
 			if err != nil {
 				rendered = choice.Content
@@ -314,11 +454,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Handle tool calls
 		if len(choice.ToolCalls) > 0 {
+			m.statusText = summarizeToolCalls(choice.ToolCalls) + " Tool lines above are intermediate."
 			for _, tc := range choice.ToolCalls {
 				m.messages = append(m.messages, toolStyle.Copy().Width(m.viewport.Width-4).Render(fmt.Sprintf("  [%s] args: %s", toolCallName(tc), toolCallArguments(tc))))
 			}
-			m.viewport.SetContent(strings.Join(m.messages, "\n"))
-			m.viewport.GotoBottom()
+			m.refreshViewport(false)
 			return m, m.executeTools(choice.ToolCalls)
 		}
 
@@ -333,8 +473,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastInput = ""
 		}
 		m.isThinking = false
-		m.viewport.SetContent(strings.Join(m.messages, "\n"))
-		m.viewport.GotoBottom()
+		m.statusText = ""
+		m.refreshViewport(false)
 		return m, nil
 
 	case toolsResultMsg:
@@ -344,14 +484,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Parts: []llms.ContentPart{res},
 			})
 		}
+		m.statusText = "Tool results received. Drafting final answer..."
+		m.refreshViewport(false)
 		return m, m.generateResponse()
 
 	case errMsg:
 		m.err = msg.err
 		m.isThinking = false
+		m.statusText = ""
 		m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-		m.viewport.SetContent(strings.Join(m.messages, "\n"))
-		m.viewport.GotoBottom()
+		m.refreshViewport(false)
 		return m, nil
 	}
 
@@ -366,12 +508,22 @@ func (m model) View() string {
 	}
 
 	var s string
-	s += m.viewport.View() + "\n"
+	s += m.viewport.View() + "\n\n\n\n"
 	if m.isThinking {
-		s += m.spinner.View() + " Thinking...\n"
+		status := m.statusText
+		if status == "" {
+			status = "Thinking..."
+		}
+		s += statusStyle.Render(m.spinner.View()+" "+status) + "\n"
 	} else {
 		s += "\n"
 	}
+
+	help := "Up/Down: history  PgUp/PgDn: scroll  TAB: focus output"
+	if m.focus == focusOutput {
+		help = "UP/DOWN: scroll output  PgUp/PgDn: scroll  TAB: focus input"
+	}
+	s += systemStyle.Render(help) + "\n"
 	s += m.textInput.View()
 
 	return s
@@ -612,7 +764,7 @@ func (m modelSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c", "ctrl+d", "q":
 			m.quitting = true
 			return m, tea.Quit
 
@@ -1080,5 +1232,38 @@ func runApp(modelFlag string, memoryFlag bool) {
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
+	}
+}
+
+func loadHistory() []string {
+	histFile := util.ClientHistoryFile()
+	data, err := os.ReadFile(histFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("failed to read history file", "file", histFile, "error", err)
+		}
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	var history []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			history = append(history, line)
+		}
+	}
+	return history
+}
+
+func saveHistory(input string) {
+	histFile := util.ClientHistoryFile()
+	f, err := os.OpenFile(histFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		slog.Warn("failed to open history file", "file", histFile, "error", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(input + "\n"); err != nil {
+		slog.Warn("failed to write to history file", "file", histFile, "error", err)
 	}
 }
