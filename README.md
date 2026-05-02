@@ -1,6 +1,8 @@
 # Elastic Security MCP Server
 
-An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases.
+An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases with optional local Redis caching to reduce upstream lookups.
+
+This can be used with coding agents (only Gemini has been tested) or the the cli in this project. 
 
 ## Elastic Security Assistant (CLI)
 
@@ -18,7 +20,10 @@ The project includes a powerful, agentic CLI that acts as a security analyst ass
 The MCP server provides the following tools to any compatible host:
 
 - **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
-- **search_elastic**: Tool to search Elasticsearch indices using the full Query DSL.
+- **search_security_events**: Structured, snippets-first search for ECS-style Zeek and Suricata data with typed filters (`text`, `start`, `end`, `ip`, `src_ip`, `dst_ip`, `domain`, `url`, `dataset`), boosted network fields, and highlighting.
+- **lookup_domain**: Check local Redis cache for DNS activity history for a specific domain name. Returns recent DNS queries, source IPs, and resolved addresses from previously observed traffic.
+- **lookup_ip**: Check local Redis cache for any observed activity involving an IP address. Returns DNS records where this IP appeared as an answer and DNS queries made by this IP as a source.
+- **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries.
 
 ## Key Libraries
 
@@ -26,6 +31,7 @@ This project leverages several powerful libraries:
 
 - [**Elasticsearch Go Client**](https://github.com/elastic/go-elasticsearch): The official Go client for Elasticsearch.
 - [**Model Context Protocol (MCP) SDK**](https://github.com/modelcontextprotocol/go-sdk): SDK for building MCP servers and clients.
+- [**Redis Go Client**](https://github.com/redis/go-redis): Type-safe Redis client for Go.
 - [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
 - [**Lip Gloss**](https://github.com/charmbracelet/lipgloss): Style and layout primitives for the terminal.
 - [**LangChainGo**](https://github.com/tmc/langchaingo): A framework for building LLM-powered applications in Go.
@@ -36,6 +42,7 @@ This project leverages several powerful libraries:
 
 - Go 1.26.2 or higher
 - Access to an Elasticsearch cluster (URL and API Key)
+- Redis server (running on `localhost:6379` by default) for caching and lookup tools
 - At least one LLM API key for the CLI:
   - `OPENAI_API_KEY`
   - `ANTHROPIC_API_KEY`
@@ -69,8 +76,15 @@ Optional variables:
 - `CLIENT_LOG_FILE`: Log file path for the CLI. Default is `elastic-cli.log`.
 - `CLIENT_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` for the CLI. Default is `info`.
 - `CLIENT_LOG_PAYLOADS`: Set to `true` to log full CLI LLM request/response payloads. Default is off.
+- `CLIENT_HISTORY_FILE`: Path to the CLI command history file. Default is `~/.elastic-cli-history`.
 - `SERVER_LOG_FILE`: Log file path for the MCP server. Default is `elastic-mcp-server.log`.
 - `SERVER_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` for the MCP server. Default is `info`.
+- `CACHE_ENABLED`: Set to `false` to disable Redis caching. Default is `true`.
+- `REDIS_ADDR`: Address of the Redis server. Default is `localhost:6379`.
+- `CACHE_SEARCH_SECURITY_EVENTS_TTL`: Cache TTL in seconds for `search_security_events`. Default is `600`.
+- `CACHE_SEARCH_ELASTIC_TTL`: Cache TTL in seconds for `search_elastic`. Default is `600`.
+- `CACHE_LIST_INDICES_TTL`: Cache TTL in seconds for `list_indices`. Default is `3600`.
+- `MAX_RESPONSE_CHARS`: Maximum JSON response size returned by search tools before truncation. Default is `20000`.
 
 ## Usage
 
@@ -90,6 +104,8 @@ You can also pick a model explicitly:
 ```bash
 ./elastic-cli --model gpt-5
 ```
+
+The CLI is tuned to prefer `search_security_events` for typical investigations and only fall back to `search_elastic` when raw DSL control is required.
 
 ### Running the server standalone
 
