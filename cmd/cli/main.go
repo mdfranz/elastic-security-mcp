@@ -42,6 +42,7 @@ DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
 ALWAYS use Markdown tables for tabular data.`
 
 const maxLoggedPayloadChars = 4000
+const maxHistoryMessages = 15
 
 // Styles
 var (
@@ -260,6 +261,15 @@ func (m *model) browseHistory(delta int) {
 	m.textInput.SetCursor(len([]rune(m.inputHist[m.histIndex])))
 }
 
+func (m *model) pruneHistory() {
+	if len(m.history) <= maxHistoryMessages {
+		return
+	}
+	pruned := []llms.MessageContent{m.history[0]}
+	pruned = append(pruned, m.history[len(m.history)-maxHistoryMessages+1:]...)
+	m.history = pruned
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
@@ -342,14 +352,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wrappedUser := lipgloss.NewStyle().Width(m.viewport.Width - 10).Render(input)
 			m.messages = append(m.messages, fmt.Sprintf("%s %s", userStyle.Render("You:"), wrappedUser))
 
-			if !m.useMemory && len(m.history) > 1 {
-				// Clear history except system prompt
-				m.history = []llms.MessageContent{m.history[0]}
-			}
 			m.history = append(m.history, llms.MessageContent{
 				Role:  llms.ChatMessageTypeHuman,
 				Parts: []llms.ContentPart{llms.TextContent{Text: input}},
 			})
+
+			if !m.useMemory {
+				m.pruneHistory()
+			}
 
 			m.pushInputHistory(input)
 			m.lastInput = input

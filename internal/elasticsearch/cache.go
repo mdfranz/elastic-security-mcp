@@ -50,15 +50,15 @@ func RedisAddr() string {
 }
 
 func ListIndicesTTL() time.Duration {
-	return ttlFromEnv("CACHE_LIST_INDICES_TTL", 300)
+	return ttlFromEnv("CACHE_LIST_INDICES_TTL", 3600)
 }
 
 func SearchElasticTTL() time.Duration {
-	return ttlFromEnv("CACHE_SEARCH_ELASTIC_TTL", 60)
+	return ttlFromEnv("CACHE_SEARCH_ELASTIC_TTL", 600)
 }
 
 func SearchSecurityEventsTTL() time.Duration {
-	return ttlFromEnv("CACHE_SEARCH_SECURITY_EVENTS_TTL", 60)
+	return ttlFromEnv("CACHE_SEARCH_SECURITY_EVENTS_TTL", 600)
 }
 
 func ttlFromEnv(envVar string, defaultSecs int) time.Duration {

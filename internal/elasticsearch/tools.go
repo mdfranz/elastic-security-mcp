@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/elastic/go-elasticsearch/v9/esapi"
+	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -37,7 +38,7 @@ func MaxResponseChars() int {
 			return chars
 		}
 	}
-	return 50000
+	return 20000
 }
 
 func truncateResults(result map[string]interface{}) {
@@ -110,10 +111,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 	RegisterSecuritySearchTool(server, es, cache)
 
 	// Register List Indices Tool
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list_indices",
-		Description: "List all available Elasticsearch indices",
-	}, WrapWithCache(cache, "list_indices", ListIndicesTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
+	listHandler := WrapWithCache(cache, "list_indices", ListIndicesTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
 		slog.Info("list_indices called", "pattern", args.Pattern)
 
 		opts := []func(*esapi.CatIndicesRequest){
@@ -165,13 +163,18 @@ func RegisterTools(server *mcp.Server, es *Client) {
 				&mcp.TextContent{Text: string(jsonOutput)},
 			},
 		}, nil, nil
-	}))
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_indices",
+		Description: "List all available Elasticsearch indices",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
+		args.Pattern = strings.TrimSpace(args.Pattern)
+		return listHandler(ctx, req, args)
+	})
 
 	// Register Search Tool
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_elastic",
-		Description: "Search Elasticsearch with a JSON query string",
-	}, WrapWithCache(cache, "search_elastic", SearchElasticTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
+	searchHandler := WrapWithCache(cache, "search_elastic", SearchElasticTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
 		if args.Index == "" {
 			return nil, nil, fmt.Errorf("index is required")
 		}
@@ -233,13 +236,26 @@ func RegisterTools(server *mcp.Server, es *Client) {
 					Text: string(jsonOutput)},
 			},
 		}, nil, nil
-	}))
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_elastic",
+		Description: "Search Elasticsearch with a JSON query string",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
+		args.Index = strings.TrimSpace(args.Index)
+		if strings.TrimSpace(args.Query) == "" {
+			args.Query = `{"query": {"match_all": {}}}`
+		}
+		args.Query = util.NormalizeJSON(args.Query)
+		return searchHandler(ctx, req, args)
+	})
 
 	// Register lookup_domain tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "lookup_domain",
 		Description: "Check local cache for DNS activity history for a specific domain name. Always call this before search_elastic when investigating a domain. Returns recent DNS queries, source IPs, and resolved addresses from previously observed traffic.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args LookupDomainArgs) (*mcp.CallToolResult, any, error) {
+		args.Domain = util.NormalizeDomain(args.Domain)
 		if args.Domain == "" {
 			return nil, nil, fmt.Errorf("domain is required")
 		}
@@ -264,6 +280,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		Name:        "lookup_ip",
 		Description: "Check local cache for any observed activity involving an IP address. Always call this before search_elastic when investigating a specific IP. Returns DNS records where this IP appeared as an answer and DNS queries made by this IP as a source.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args LookupIPArgs) (*mcp.CallToolResult, any, error) {
+		args.IP = strings.TrimSpace(args.IP)
 		if args.IP == "" {
 			return nil, nil, fmt.Errorf("ip is required")
 		}
