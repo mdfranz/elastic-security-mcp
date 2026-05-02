@@ -25,14 +25,20 @@ type ToolCache struct {
 
 // NewToolCache creates a ToolCache using REDIS_ADDR and CACHE_ENABLED env vars.
 func NewToolCache() *ToolCache {
-	return &ToolCache{
-		client: redis.NewClient(&redis.Options{
+	enabled := CacheEnabled()
+	var client *redis.Client
+	if enabled {
+		client = redis.NewClient(&redis.Options{
 			Addr: RedisAddr(),
-		}),
-		enabled: CacheEnabled(),
+		})
+	}
+	return &ToolCache{
+		client:  client,
+		enabled: enabled,
 	}
 }
 
+// CacheEnabled returns true unless CACHE_ENABLED is explicitly set to false, 0, no, or off.
 func CacheEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CACHE_ENABLED"))) {
 	case "0", "false", "no", "off":
@@ -111,10 +117,16 @@ func (c *ToolCache) IndexTypedSearchResult(ctx context.Context, result *search.R
 }
 
 func (c *ToolCache) LookupDomain(ctx context.Context, domain string) ([]string, error) {
+	if !c.enabled || c.client == nil {
+		return nil, nil
+	}
 	return c.client.ZRevRange(ctx, "dns:name:"+domain, 0, 99).Result()
 }
 
 func (c *ToolCache) LookupIP(ctx context.Context, ip string) (dnsAnswers []string, dnsQueries []string, err error) {
+	if !c.enabled || c.client == nil {
+		return nil, nil, nil
+	}
 	dnsAnswers, err = c.client.ZRevRange(ctx, "dns:ip:"+ip, 0, 99).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, nil, err

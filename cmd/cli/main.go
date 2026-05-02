@@ -1267,7 +1267,7 @@ func loadHistory() []string {
 
 func saveHistory(input string) {
 	histFile := util.ClientHistoryFile()
-	f, err := os.OpenFile(histFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(histFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		slog.Warn("failed to open history file", "file", histFile, "error", err)
 		return

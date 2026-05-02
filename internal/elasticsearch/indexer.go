@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
+	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -35,6 +36,8 @@ func indexSearchResult(ctx context.Context, client *redis.Client, result map[str
 	if !ok {
 		return
 	}
+
+	pipe := client.Pipeline()
 	indexed := 0
 	for _, h := range hitList {
 		hit, ok := h.(map[string]interface{})
@@ -45,12 +48,17 @@ func indexSearchResult(ctx context.Context, client *redis.Client, result map[str
 		if !ok {
 			continue
 		}
-		if indexZeekDNSHit(ctx, client, source) {
+		if indexZeekDNSHit(ctx, pipe, source) {
 			indexed++
 		}
 	}
+
 	if indexed > 0 {
-		slog.Info("indexed search hits", "count", indexed)
+		if _, err := pipe.Exec(ctx); err != nil {
+			slog.Warn("redis batch index error", "error", err)
+		} else {
+			slog.Info("indexed search hits", "count", indexed)
+		}
 	}
 }
 
@@ -58,6 +66,8 @@ func indexTypedSearchResult(ctx context.Context, client *redis.Client, result *s
 	if result == nil {
 		return
 	}
+
+	pipe := client.Pipeline()
 	indexed := 0
 	for _, hit := range result.Hits.Hits {
 		source := make(map[string]interface{})
@@ -68,12 +78,17 @@ func indexTypedSearchResult(ctx context.Context, client *redis.Client, result *s
 			slog.Warn("failed to decode typed search hit", "index", hit.Index_, "id", valueOrEmpty(hit.Id_), "error", err)
 			continue
 		}
-		if indexZeekDNSHit(ctx, client, source) {
+		if indexZeekDNSHit(ctx, pipe, source) {
 			indexed++
 		}
 	}
+
 	if indexed > 0 {
-		slog.Info("indexed typed search hits", "count", indexed)
+		if _, err := pipe.Exec(ctx); err != nil {
+			slog.Warn("redis batch index error", "error", err)
+		} else {
+			slog.Info("indexed typed search hits", "count", indexed)
+		}
 	}
 }
 
@@ -84,7 +99,7 @@ func valueOrEmpty(v *string) string {
 	return *v
 }
 
-func indexZeekDNSHit(ctx context.Context, client *redis.Client, source map[string]interface{}) bool {
+func indexZeekDNSHit(ctx context.Context, pipe redis.Pipeliner, source map[string]interface{}) bool {
 	ds, _ := source["data_stream"].(map[string]interface{})
 	if ds == nil {
 		return false
@@ -106,6 +121,7 @@ func indexZeekDNSHit(ctx context.Context, client *redis.Client, source map[strin
 	}
 	question, _ := dns["question"].(map[string]interface{})
 	domain, _ := question["name"].(string)
+	domain = util.NormalizeDomain(domain)
 	if domain == "" {
 		return false
 	}
@@ -123,8 +139,6 @@ func indexZeekDNSHit(ctx context.Context, client *redis.Client, source map[strin
 			}
 		}
 	}
-
-	pipe := client.Pipeline()
 
 	// domain → query records
 	recJSON, _ := json.Marshal(dnsRecord{Ts: tsStr, Src: srcIP, Answers: resolvedIPs})
@@ -151,10 +165,5 @@ func indexZeekDNSHit(ctx context.Context, client *redis.Client, source map[strin
 		pipe.Expire(ctx, srcKey, entityTTL)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil {
-		slog.Warn("redis index error", "domain", domain, "error", err)
-		return false
-	}
-	slog.Debug("indexed zeek dns", "domain", domain, "resolved", len(resolvedIPs))
 	return true
 }

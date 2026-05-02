@@ -272,3 +272,35 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	}
 	return b
 }
+
+func TestBuildTermQuerySpecialCases(t *testing.T) {
+	// Test CIDR
+	q := buildTermQuery("source.ip", "10.0.0.0/8")
+	if q.QueryString == nil {
+		t.Fatal("expected query_string for CIDR")
+	}
+	if q.QueryString.Query != "source.ip: \"10.0.0.0/8\"" {
+		t.Errorf("unexpected CIDR query: %s", q.QueryString.Query)
+	}
+
+	// Test Wildcard
+	q = buildTermQuery("host.name", "server*")
+	if q.Wildcard == nil {
+		t.Fatal("expected wildcard for *")
+	}
+	if *q.Wildcard["host.name"].Value != "server*" {
+		t.Errorf("unexpected wildcard: %s", *q.Wildcard["host.name"].Value)
+	}
+
+	// Test MAC (should be a normal term query, but let's check it doesn't break)
+	q = buildTermQuery("source.mac", "00:11:22:33:44:55")
+	if q.Term == nil {
+		t.Fatal("expected term for MAC")
+	}
+
+	// Test MAC prefix (wildcard)
+	q = buildTermQuery("source.mac", "00:11:22*")
+	if q.Wildcard == nil {
+		t.Fatal("expected wildcard for MAC prefix")
+	}
+}

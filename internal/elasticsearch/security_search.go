@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"regexp"
 	"strings"
 
@@ -34,6 +35,10 @@ var securityTextFields = []string{
 	"server.ip^6",
 	"host.name^4",
 	"related.ip^4",
+	"source.mac^5",
+	"destination.mac^5",
+	"host.mac^4",
+	"related.mac^4",
 }
 
 var highlightFields = []string{
@@ -87,6 +92,7 @@ type SearchSecurityEventsArgs struct {
 	IP      string `json:"ip,omitempty" jsonschema:"Optional exact IP filter across common source, destination, client, server, and related IP fields"`
 	SrcIP   string `json:"src_ip,omitempty" jsonschema:"Optional exact source/client IP filter"`
 	DstIP   string `json:"dst_ip,omitempty" jsonschema:"Optional exact destination/server IP filter"`
+	MAC     string `json:"mac,omitempty" jsonschema:"Optional exact MAC address filter across common source, destination, host, and related MAC fields"`
 	Domain  string `json:"domain,omitempty" jsonschema:"Optional exact domain filter across DNS, URL domain, and TLS SNI fields"`
 	URL     string `json:"url,omitempty" jsonschema:"Optional exact full URL filter"`
 	Dataset string `json:"dataset,omitempty" jsonschema:"Optional exact event dataset filter, such as zeek.dns or suricata.eve"`
@@ -94,10 +100,7 @@ type SearchSecurityEventsArgs struct {
 }
 
 func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache) {
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_security_events",
-		Description: "Search ECS-style Zeek and Suricata data with typed filters, tuned boosts, filter-context constraints, and snippets-first highlighting.",
-	}, WrapWithCache(cache, "search_security_events", SearchSecurityEventsTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityEventsArgs) (*mcp.CallToolResult, any, error) {
+	innerHandler := WrapWithCache(cache, "search_security_events", SearchSecurityEventsTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityEventsArgs) (*mcp.CallToolResult, any, error) {
 		result, err := runSecuritySearch(ctx, es, cache, args)
 		if err != nil {
 			return nil, nil, err
@@ -109,7 +112,19 @@ func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(jsonOutput)}},
 		}, nil, nil
-	}))
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_security_events",
+		Description: "Search ECS-style Zeek and Suricata data with typed filters, tuned boosts, filter-context constraints, and snippets-first highlighting.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityEventsArgs) (res *mcp.CallToolResult, extra any, err error) {
+		defer recoverToolPanic("search_security_events", &err)
+		normalized, err := normalizeSecuritySearchArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		return innerHandler(ctx, req, normalized)
+	})
 }
 
 func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args SearchSecurityEventsArgs) (map[string]interface{}, error) {
@@ -117,20 +132,15 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
 	}
 
-	normalized, err := normalizeSecuritySearchArgs(args)
-	if err != nil {
-		return nil, err
-	}
-
-	req := buildSecuritySearchRequest(normalized)
-	slog.Info("search_security_events called", "index", normalized.Index, "size", normalized.Size, "text", normalized.Text != "", "filters", securityFilterCount(normalized))
+	req := buildSecuritySearchRequest(args)
+	slog.Info("search_security_events called", "index", args.Index, "size", args.Size, "text", args.Text, "start", args.Start, "end", args.End, "ip", args.IP, "src_ip", args.SrcIP, "dst_ip", args.DstIP, "mac", args.MAC, "domain", args.Domain, "url", args.URL, "dataset", args.Dataset)
 
 	resp, err := es.Typed.Search().
-		Index(normalized.Index).
+		Index(args.Index).
 		Request(req).
 		Do(ctx)
 	if err != nil {
-		slog.Error("search_security_events error", "index", normalized.Index, "error", err)
+		slog.Error("search_security_events error", "index", args.Index, "error", err)
 		return nil, fmt.Errorf("search_security_events error: %w", err)
 	}
 
@@ -155,6 +165,7 @@ func normalizeSecuritySearchArgs(args SearchSecurityEventsArgs) (SearchSecurityE
 	args.IP = strings.TrimSpace(args.IP)
 	args.SrcIP = strings.TrimSpace(args.SrcIP)
 	args.DstIP = strings.TrimSpace(args.DstIP)
+	args.MAC = strings.TrimSpace(args.MAC)
 	args.Domain = strings.TrimSpace(args.Domain)
 	args.URL = strings.TrimSpace(args.URL)
 	args.Dataset = strings.TrimSpace(args.Dataset)
@@ -177,12 +188,12 @@ func normalizeSecuritySearchArgs(args SearchSecurityEventsArgs) (SearchSecurityE
 }
 
 func hasSecurityConstraint(args SearchSecurityEventsArgs) bool {
-	return args.Text != "" || args.Start != "" || args.End != "" || args.IP != "" || args.SrcIP != "" || args.DstIP != "" || args.Domain != "" || args.URL != "" || args.Dataset != ""
+	return args.Text != "" || args.Start != "" || args.End != "" || args.IP != "" || args.SrcIP != "" || args.DstIP != "" || args.MAC != "" || args.Domain != "" || args.URL != "" || args.Dataset != ""
 }
 
 func securityFilterCount(args SearchSecurityEventsArgs) int {
 	count := 0
-	for _, v := range []string{args.Start, args.End, args.IP, args.SrcIP, args.DstIP, args.Domain, args.URL, args.Dataset} {
+	for _, v := range []string{args.Start, args.End, args.IP, args.SrcIP, args.DstIP, args.MAC, args.Domain, args.URL, args.Dataset} {
 		if v != "" {
 			count++
 		}
@@ -242,6 +253,15 @@ func buildSecurityFilters(args SearchSecurityEventsArgs) []types.Query {
 			"destination.ip",
 			"server.ip",
 		}, args.DstIP))
+	}
+	if args.MAC != "" {
+		filters = append(filters, buildAnyTermFilter([]string{
+			"source.mac",
+			"destination.mac",
+			"host.mac",
+			"related.mac",
+			"zeek.dhcp.address.mac",
+		}, args.MAC))
 	}
 	if args.Domain != "" {
 		filters = append(filters, buildAnyTermFilter([]string{
@@ -304,6 +324,27 @@ func buildAnyTermFilter(fields []string, value string) types.Query {
 }
 
 func buildTermQuery(field, value string) types.Query {
+	// If it's an IP field and the value is CIDR notation, use a QueryString query
+	// because the 'term' query does not support CIDR.
+	if (strings.HasSuffix(field, ".ip") || field == "ip" || field == "related.ip") && strings.Contains(value, "/") {
+		if _, _, err := net.ParseCIDR(value); err == nil {
+			return types.Query{
+				QueryString: &types.QueryStringQuery{
+					Query: fmt.Sprintf("%s: \"%s\"", field, value),
+				},
+			}
+		}
+	}
+
+	// If the value contains wildcards, use a 'wildcard' query.
+	if strings.Contains(value, "*") || strings.Contains(value, "?") {
+		return types.Query{
+			Wildcard: map[string]types.WildcardQuery{
+				field: {Value: &value},
+			},
+		}
+	}
+
 	return types.Query{
 		Term: map[string]types.TermQuery{
 			field: {Value: value},
@@ -543,8 +584,12 @@ func truncateSecuritySearchResults(result map[string]interface{}) {
 	if keepCount < 1 {
 		keepCount = 1
 	}
+	if keepCount > originalCount {
+		keepCount = originalCount
+	}
+
 	if keepCount >= originalCount {
-		keepCount = originalCount - 1
+		return
 	}
 
 	result["hits"] = hits[:keepCount]
