@@ -2,7 +2,20 @@
 
 An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases.
 
-## Features
+## Elastic Security Assistant (CLI)
+
+The project includes a powerful, agentic CLI that acts as a security analyst assistant.
+
+- **Interactive TUI**: Built with Bubble Tea and Lip Gloss for a modern terminal experience.
+- **Multi-Provider Support**: Seamlessly switch between OpenAI, Anthropic, and Google Gemini models.
+- **Interactive Model Selection**: Pick your preferred provider and model on startup if not pre-configured.
+- **Conversation Memory**: Built-in context management for long-running investigations (type `/memory` to view).
+- **One-Shot Execution**: Run quick queries and exit using the `--prompt` or `-p` flag.
+- **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
+
+## Server Tools
+
+The MCP server provides the following tools to any compatible host:
 
 - **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
 - **search_elastic**: Tool to search Elasticsearch indices using the full Query DSL.
