@@ -158,7 +158,7 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 		if strings.Contains(err.Error(), "all shards failed") {
 			errMsg += " (all shards failed — index may be unhealthy or missing fields; try with a specific index name or use list_indices to verify)"
 		}
-		return nil, fmt.Errorf(errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	if cache != nil {

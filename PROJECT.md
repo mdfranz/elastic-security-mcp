@@ -11,137 +11,124 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 **Theme:** MCP server runtime and Elasticsearch integration
 
 ### Key Accomplishments
-- **MCP Server Implementation**: Developed an MCP server that communicates over stdio.
-- **Elasticsearch Integration**: Integrated the official Go Elasticsearch client.
-- **Foundational Tools**: Implemented `list_indices` and `search_elastic` for raw query access.
-- **Testing Utilities**: Added `test-mcp` to verify tool registration and protocol compliance.
+- **MCP Server Implementation**: Developed a robust MCP server using the official `modelcontextprotocol/go-sdk`, communicating over stdio.
+- **Elasticsearch Integration**: Integrated the official `go-elasticsearch/v9` client, supporting both raw and typed APIs.
+- **Foundational Tools**: Implemented `list_indices` (with health/size metadata) and `search_elastic` for raw Query DSL access.
+- **Testing Utilities**: Built a dedicated `test-mcp` CLI to verify tool registration and protocol compliance without an LLM.
 
 ### Technical Decisions
-- Chose Go for performance and official client support.
-- Used stdin/stdout for MCP communication to minimize external dependencies.
-- Exposed raw Elasticsearch Query DSL for flexible querying.
-
-### Output
-- MCP server (`elastic-mcp-server`) compatible with MCP hosts.
-- Tool set for basic Elasticsearch interaction.
+- **Go Standard Library + Official SDKs**: Prioritized official libraries for protocol compliance and performance.
+- **JSON-RPC 2.0**: Leveraged the MCP's underlying JSON-RPC transport for reliable tool calling.
+- **Raw DSL Exposure**: Decided to expose the raw Elasticsearch DSL early to ensure no loss of query power during prototyping.
 
 ---
 
 ## Phase 2: CLI & Multi-Provider LLM Support (Commits 28a8b01 → 22e1a3a)
 
-**Theme:** CLI development and multi-provider LLM integration
+**Theme:** Interactive TUI development and provider abstraction
 
 ### Key Accomplishments
-- **CLI Development**: Built `elastic-cli` using the Bubble Tea TUI framework.
-- **Multi-Provider Support**: Integrated OpenAI, Anthropic, and Google Gemini.
-- **Conversation Management**: Implemented history management, tool-use loops, and iterative refinement.
-- **Logging Infrastructure**: Added configurable logging for both server and client components.
+- **Interactive TUI**: Built `elastic-cli` using the **Bubble Tea** TUI framework, featuring a real-time reactive interface with spinners and formatted output.
+- **Multi-Provider Support**: Integrated OpenAI, Anthropic, and Google Gemini using **LangChainGo** as a common abstraction layer.
+- **Conversation Management**: Implemented a stateful conversation loop with history management and automated tool-use refinement.
+- **Logging Infrastructure**: Added structured logging (`slog`) with separate control for client and server verbosity.
 
 ### Technical Decisions
-- Used LangChainGo for a consistent abstraction across LLM providers.
-- Implemented separate logging for client and server to assist in debugging.
-- Configuration managed via environment variables (e.g., `ELASTIC_MODEL`).
-
-### Output
-- CLI with model selection and interactive conversation.
-- Support for multiple LLM providers via a single interface.
+- **Elm Architecture (Bubble Tea)**: Adopted a functional UI pattern for the CLI to handle complex asynchronous tool states.
+- **Provider Normalization**: Used LangChainGo to map disparate LLM tool-calling formats into a single internal representation.
+- **Environment-Based Config**: Standardized on `ELASTIC_MODEL` and provider-specific API keys for configuration.
 
 ---
 
 ## Phase 3: Security-Focused Search & Caching (Commits 6e8917a → 5243e30)
 
-**Theme:** Domain-specific search tools and caching
+**Theme:** Domain-specific search tools and indicator indexing
 
 ### Key Accomplishments
-- **ECS-Aware Search**: Introduced `search_security_events` with field boosting for Zeek and Suricata data (source.ip, destination.ip, dns.question.name, etc.).
-- **Redis Caching**: Implemented a Redis-backed cache for tool results to reduce Elasticsearch load.
-- **Indicator Lookups**: Added `lookup_domain` and `lookup_ip` tools for fast retrieval of previously observed activity.
-- **Passive Indexing**: Search results from `zeek.dns` data are automatically indexed into Redis for later lookup.
-- **Result Highlighting**: Added server-side highlighting and snippet generation to surface relevant data to the LLM.
+- **ECS-Aware Search**: Introduced `search_security_events` with field boosting (e.g., `source.ip^3`, `dns.question.name^2`) to surface high-signal security data.
+- **Redis Caching**: Implemented a Redis-backed result cache using `go-redis/v9` to eliminate redundant cluster load.
+- **Passive Indicator Indexing**: Automatically extracts IPs and domains from `zeek.dns` search results and indexes them into Redis sorted sets.
+- **Indicator Lookups**: Added `lookup_domain` and `lookup_ip` tools for instantaneous retrieval of previously observed activity.
 
 ### Technical Decisions
-- Redis for fast, key-value storage of tool results and security indicators.
-- Standardized on ECS (Elastic Common Schema) to ensure consistent behavior across different datasets.
-- Implemented "snippets-first" approach to keep LLM context focused.
-
-### Output
-- Security-focused search tool with CIDR support and field-level priority.
-- Redis-backed lookup tools for domains and IP addresses.
-- Passive population of indicator cache from search results.
+- **ECS as Source of Truth**: Standardized all security tools on the Elastic Common Schema to ensure portability across datasets.
+- **Shadow Indexing**: Chose to "shadow" security entities in Redis rather than re-querying Elastic for simple lookups to improve latency.
+- **Snippets-First UI**: Implemented server-side truncation and snippet generation to keep LLM context windows focused on the most relevant hits.
 
 ---
 
-## Phase 4: Performance & Optimization (Commits ad3ecd6 → 64fd61c)
+## Phase 4: Performance & Context Optimization (Commits ad3ecd6 → 64fd61c)
 
-**Theme:** Resource management and performance tuning
+**Theme:** Resource management and stability
 
 ### Key Accomplishments
-- **Cache Optimization**: Adjusted TTLs based on data volatility (e.g., 1 hour for indices, 10 minutes for searches).
-- **Response Truncation**: Implemented logic to truncate large tool responses (default 20,000 characters) to prevent context window overflow.
-- **History Pruning**: Added rolling-window history pruning (default 15 messages) in the CLI to maintain long-running sessions.
-- **Token Efficiency**: Reduced redundant data in tool responses by stripping metadata from truncated results.
+- **Dynamic Response Truncation**: Implemented a strict 20,000 character limit on tool responses with intelligent metadata stripping.
+- **Rolling History Pruning**: Added a configurable sliding window (default 15 messages) to maintain session stability in long-running investigations.
+- **Cache TTL Tuning**: Implemented tiered TTLs (1 hour for static metadata, 10 minutes for transient search results).
+- **Tool Concurrency**: Optimized the CLI to handle multiple parallel tool calls generated by the LLM.
 
 ### Technical Decisions
-- Tuned TTLs to balance data freshness with cache efficiency.
-- Used a rolling window for history to preserve recent context while staying within token limits.
+- **Token Efficiency over Completeness**: Prioritized keeping the LLM within its "sweet spot" context window over returning exhaustive result sets.
+- **Client-Side State**: Kept the MCP server stateless, delegating all conversation history and pruning logic to the CLI.
 
-### Output
-- Improved performance for repeated queries.
-- Stable long-running CLI sessions through active context management.
+---
+
+## Phase 5: Web UI, Observability & Robustness (Commits 6141e72 → bf20343)
+
+**Theme:** Advanced interfaces and production readiness
+
+### Key Accomplishments
+- **Optional Web UI**: Developed a browser-based interface with a "security terminal" aesthetic, served via a local WebSocket bridge.
+- **Export to Markdown**: Added a feature to export entire investigation sessions to formatted Markdown for reporting.
+- **Cache Statistics**: Integrated real-time cache hit/miss/store indicators and stats into both the TUI and Web UI.
+- **Advanced Query Support**: Enhanced `search_security_events` with support for MAC addresses, CIDR blocks, and wildcard domain searches.
+- **System Stability**: 
+    - Implemented **Tool Timeouts** to prevent orphaned processes.
+    - Added **Server Locking** via `.lock` files to prevent concurrent instance conflicts.
+    - Improved error reporting with detailed context on failed Elasticsearch queries.
+
+### Technical Decisions
+- **WebSocket Relay**: Built a custom relay in `internal/webui` to bridge the stdio-based MCP protocol to the browser.
+- **Embedded Assets**: Used Go's `embed` package to bundle the Web UI (HTML/CSS/JS) into a single distributable binary.
+- **Strict Mode**: Implemented CIDR and MAC address validation/escaping to prevent injection or malformed Elastic queries.
 
 ---
 
 ## Architectural Themes
 
-### 1. **Layered Abstraction**
-The project provides multiple levels of access to Elasticsearch:
+### 1. **Client-Server Separation (MCP)**
+- **Server-Side**: Handles data fetching, caching, and normalization. Protocol-compliant and LLM-agnostic.
+- **Client-Side**: Handles orchestration, UI, and history. Connects via stdio.
+
+### 2. **Layered Abstraction**
 - **Raw** (`search_elastic`): Direct Query DSL access.
-- **Typed** (`search_security_events`): Pre-configured filters and boosts for security data.
-- **Cached** (`lookup_domain`, `lookup_ip`): Instant retrieval of observed indicators.
+- **Typed** (`search_security_events`): ECS-optimized filtering.
+- **Cached** (`lookup_*`): Sub-millisecond entity lookups.
 
-### 2. **Caching and Passive Indexing**
-Redis serves two purposes:
-- **Result Cache**: Caches the full output of tool calls (e.g., `list_indices`).
-- **Entity Index**: Stores specific security entities (IPs, domains) extracted from search results for fast cross-referencing.
-
-### 3. **Provider-Agnostic Design**
-The CLI abstracts differences between LLM providers:
-- Common tool definitions across OpenAI, Anthropic, and Gemini.
-- Custom handling for provider-specific features, such as Gemini's `thoughtSignature`.
-
-### 4. **ECS-Centric Tooling**
-Assumes data follows the Elastic Common Schema:
-- Tools are optimized for fields like `source.ip`, `destination.ip`, and `dns.question.name`.
-- Normalization ensures consistent querying regardless of the underlying data source.
+### 3. **Observability & Aesthetics**
+- High-contrast, security-focused UI design in both terminal and browser.
+- Transparent reporting of "where" data comes from (Cache vs. Elastic).
 
 ---
 
 ## Current Capabilities
 
 ### Tools
-- **list_indices**: List and filter indices with health and size metadata.
-- **search_security_events**: ECS-aware search with support for CIDR, MAC, and domain filters.
-- **lookup_domain**: Retrieve recent DNS records and source IPs for a domain from the Redis cache.
-- **lookup_ip**: Retrieve DNS activity (queries and answers) associated with an IP from the Redis cache.
-- **search_elastic**: Raw Elasticsearch DSL search with response truncation.
+- **list_indices**: Pattern-based index listing with health/size stats.
+- **search_security_events**: ECS search with CIDR, MAC, and Wildcard support.
+- **lookup_domain / lookup_ip**: Redis-backed entity lookups.
+- **search_elastic**: Raw JSON DSL search.
 
 ### Configuration
-- **ELASTIC_MODEL**: Default LLM model ID.
-- **CACHE_ENABLED**: Toggle Redis caching (default: true).
-- **REDIS_ADDR**: Redis server address (default: localhost:6379).
-- **MAX_RESPONSE_CHARS**: Maximum characters returned per tool call (default: 20000).
+- `ELASTIC_MODEL`: Default LLM.
+- `CACHE_ENABLED`: Redis toggle.
+- `WEBUI_ENABLED`: Optional browser interface.
+- `MAX_RESPONSE_CHARS`: Truncation limit.
 
 ---
 
-## Known Limitations & Future Work
-
-### Current Limitations
-1. **Single-Cluster**: Only supports a single Elasticsearch cluster connection.
-2. **Stateless Server**: The MCP server does not maintain session state; state is managed by the client or Redis.
-3. **Passive Population Only**: `lookup_*` tools only contain data from previous `search_*` calls.
-
-### Future Work
-- **Token-Aware Pruning**: Switch from message-count pruning to token-count pruning for better context management.
-- **Multi-Cluster Support**: Support for querying multiple Elasticsearch clusters.
-- **Cache Warming**: Background tasks to pre-populate the cache for common queries.
-- **Adaptive TTLs**: Dynamically adjust TTLs based on index update frequency.
+## Future Work
+- **Token-Aware Pruning**: Moving from message counts to actual token counting.
+- **Multi-Cluster Support**: Federation across multiple Elastic clusters.
+- **Automated Reporting**: Generation of PDF/HTML security reports from session history.
+- **Adaptive TTLs**: Dynamic cache invalidation based on index metadata.
