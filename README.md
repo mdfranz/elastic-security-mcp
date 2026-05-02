@@ -1,6 +1,8 @@
 # Elastic Security MCP Server
 
-An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases.
+An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases with optional local Redis caching to reduce upstream lookups.
+
+This can be used with coding agents (only Gemini has been tested) or the the cli in this project. 
 
 ## Features
 
