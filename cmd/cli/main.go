@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mfranz/elastic-security-mcp/internal/llm"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
+	"github.com/mfranz/elastic-security-mcp/internal/webui"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 	"github.com/tmc/langchaingo/llms"
@@ -816,6 +817,8 @@ func main() {
 	var modelFlag string
 	var memoryFlag bool
 	var promptFlag string
+	var webuiFlag bool
+	var portFlag int
 
 	rootCmd := &cobra.Command{
 		Use:   "elastic-cli",
@@ -823,6 +826,8 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			if promptFlag != "" {
 				runSinglePrompt(modelFlag, promptFlag)
+			} else if webuiFlag {
+				runWebUI(modelFlag, memoryFlag, portFlag)
 			} else {
 				runApp(modelFlag, memoryFlag)
 			}
@@ -832,6 +837,8 @@ func main() {
 	rootCmd.Flags().StringVarP(&modelFlag, "model", "m", "", "Model ID to use (e.g. gpt-5, claude-3-7-sonnet-latest)")
 	rootCmd.Flags().BoolVar(&memoryFlag, "memory", true, "Enable conversation memory")
 	rootCmd.Flags().StringVarP(&promptFlag, "prompt", "p", "", "Run a single prompt and exit")
+	rootCmd.Flags().BoolVar(&webuiFlag, "webui", false, "Start optional Web UI")
+	rootCmd.Flags().IntVar(&portFlag, "port", 8080, "Port for Web UI")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -1038,22 +1045,37 @@ func runSinglePrompt(modelFlag string, prompt string) {
 	}
 }
 
-func runApp(modelFlag string, memoryFlag bool) {
+func runWebUI(modelFlag string, memoryFlag bool, port int) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	session, llmClient, lcTools, modelName, err := setupApp(ctx, modelFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer session.Close()
+
+	fmt.Printf("Web UI starting at http://localhost:%d\n", port)
+	if err := webui.RunServer(ctx, session, llmClient, lcTools, modelName, port, memoryFlag); err != nil {
+		fmt.Fprintf(os.Stderr, "Web UI error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.Model, []llms.Tool, string, error) {
 	// 1. Logging Setup (keep slog for background details)
 	logFile := util.ClientLogFile()
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
-		os.Exit(1)
+		return nil, nil, nil, "", fmt.Errorf("failed to open log file %s: %w", logFile, err)
 	}
-	defer f.Close()
+	// Note: We don't close f here as it's used by the logger throughout the app life
+	// but we could wrap it if needed. For now, following original logic.
 
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: util.ClientLogLevel()}))
 	slog.SetDefault(logger)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Server path
 	serverPath := os.Getenv("ELASTIC_MCP_SERVER")
@@ -1088,8 +1110,7 @@ func runApp(modelFlag string, memoryFlag bool) {
 		}
 
 		if len(providerItems) == 0 {
-			fmt.Fprintln(os.Stderr, "No LLM API keys found (OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY)")
-			os.Exit(1)
+			return nil, nil, nil, "", errors.New("no LLM API keys found (OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY)")
 		}
 
 		// Only ask for provider if more than one is available
@@ -1105,8 +1126,7 @@ func runApp(modelFlag string, memoryFlag bool) {
 			p := tea.NewProgram(m)
 			out, err := p.Run()
 			if err != nil {
-				fmt.Printf("Error running provider selector: %v", err)
-				os.Exit(1)
+				return nil, nil, nil, "", fmt.Errorf("error running provider selector: %w", err)
 			}
 			finalP := out.(modelSelector)
 			if finalP.quitting || finalP.choice == "" {
@@ -1152,8 +1172,7 @@ func runApp(modelFlag string, memoryFlag bool) {
 		p := tea.NewProgram(m)
 		out, err := p.Run()
 		if err != nil {
-			fmt.Printf("Error running model selector: %v", err)
-			os.Exit(1)
+			return nil, nil, nil, "", fmt.Errorf("error running model selector: %w", err)
 		}
 
 		finalM := out.(modelSelector)
@@ -1178,30 +1197,25 @@ func runApp(modelFlag string, memoryFlag bool) {
 	switch modelProvider(modelName) {
 	case "openai":
 		if openaiKey == "" {
-			slog.Error("OPENAI_API_KEY is required for the selected model", "model", modelName)
-			os.Exit(1)
+			return nil, nil, nil, "", fmt.Errorf("OPENAI_API_KEY is required for the selected model %s", modelName)
 		}
 		llmClient, err = openai.New(openai.WithModel(modelName))
 	case "anthropic":
 		if anthropicKey == "" {
-			slog.Error("ANTHROPIC_API_KEY is required for the selected model", "model", modelName)
-			os.Exit(1)
+			return nil, nil, nil, "", fmt.Errorf("ANTHROPIC_API_KEY is required for the selected model %s", modelName)
 		}
 		llmClient, err = anthropic.New(anthropic.WithModel(modelName))
 	case "gemini":
 		if geminiKey == "" {
-			slog.Error("GEMINI_API_KEY is required for the selected model", "model", modelName)
-			os.Exit(1)
+			return nil, nil, nil, "", fmt.Errorf("GEMINI_API_KEY is required for the selected model %s", modelName)
 		}
 		llmClient = llm.NewGeminiModel(geminiKey, modelName, nil)
 	default:
-		slog.Error("Unsupported model prefix", "model", modelName)
-		os.Exit(1)
+		return nil, nil, nil, "", fmt.Errorf("unsupported model prefix: %s", modelName)
 	}
 
 	if err != nil {
-		slog.Error("Failed to create LLM client", "error", err)
-		os.Exit(1)
+		return nil, nil, nil, "", fmt.Errorf("failed to create LLM client: %w", err)
 	}
 
 	// MCP Setup
@@ -1211,15 +1225,13 @@ func runApp(modelFlag string, memoryFlag bool) {
 
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		slog.Error("Failed to connect to MCP server", "path", serverPath, "error", err)
-		os.Exit(1)
+		return nil, nil, nil, "", fmt.Errorf("failed to connect to MCP server at %s: %w", serverPath, err)
 	}
-	defer session.Close()
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
-		slog.Error("Failed to list tools", "error", err)
-		os.Exit(1)
+		session.Close()
+		return nil, nil, nil, "", fmt.Errorf("failed to list tools: %w", err)
 	}
 
 	lcTools := make([]llms.Tool, 0, len(toolsResult.Tools))
@@ -1236,6 +1248,20 @@ func runApp(modelFlag string, memoryFlag bool) {
 		})
 	}
 	slog.Info("Discovered tools", "count", len(lcTools), "names", toolNames)
+
+	return session, llmClient, lcTools, modelName, nil
+}
+
+func runApp(modelFlag string, memoryFlag bool) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	session, llmClient, lcTools, modelName, err := setupApp(ctx, modelFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer session.Close()
 
 	// Run Bubble Tea
 	p := tea.NewProgram(initialModel(ctx, session, llmClient, lcTools, modelName, memoryFlag), tea.WithAltScreen())

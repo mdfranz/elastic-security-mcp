@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elastic Security Assistant</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div id="app-shell">
+        <header id="header">
+            <div class="brand-block">
+                <p class="eyebrow">Elastic Security Console</p>
+                <button id="new-session-btn" type="button">New Session</button>
+            </div>
+            <div id="meta-bar">
+                <div class="meta-chip">
+                    <span class="meta-label">Model</span>
+                    <span id="model-info">Connecting...</span>
+                </div>
+                <div class="meta-chip">
+                    <span class="meta-label">Connection</span>
+                    <span id="connection-status" class="meta-value">Connecting</span>
+                </div>
+                <div class="meta-chip">
+                    <span class="meta-label">Session</span>
+                    <span id="session-status" class="meta-value">Ready</span>
+                </div>
+            </div>
+        </header>
+
+        <main id="workspace">
+            <section id="conversation-panel" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Investigation Feed</p>
+                        <h2 class="panel-title">Conversation</h2>
+                    </div>
+                </div>
+                <div id="output" class="viewport"></div>
+            </section>
+
+            <aside id="tool-panel" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Execution Trace</p>
+                        <h2 class="panel-title">Tool Activity</h2>
+                    </div>
+                    <span id="tool-count" class="panel-count">0 total</span>
+                </div>
+                <div id="tool-calls" class="tool-call-list empty-state-host">
+                    <p class="empty-state">Tool activity will appear here.</p>
+                </div>
+            </aside>
+        </main>
+
+        <section id="composer" class="panel">
+            <div id="status-line">
+                <div id="status-main">
+                    <span id="spinner" class="hidden" aria-hidden="true"></span>
+                    <span id="status-text">Ready for the next investigation.</span>
+                </div>
+                <div id="help-line">Up/Down: history · Shift+Enter not required · Enter: send</div>
+            </div>
+            <form id="input-form">
+                <label class="prompt" for="user-input">></label>
+                <input type="text" id="user-input" autofocus placeholder="Ask about security data..." autocomplete="off">
+                <button id="send-btn" type="submit">Send</button>
+            </form>
+        </section>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

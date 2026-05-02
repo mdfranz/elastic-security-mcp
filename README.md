@@ -14,6 +14,7 @@ The project includes a powerful, agentic CLI that acts as a security analyst ass
 - **Conversation Memory**: Built-in context management for long-running investigations (type `/memory` to view).
 - **One-Shot Execution**: Run quick queries and exit using the `--prompt` or `-p` flag.
 - **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
+- **Optional Web UI**: Use the `--webui` flag to start a local web server with a similar look and feel to the terminal experience.
 
 ## Server Tools
 
@@ -104,6 +105,16 @@ You can also pick a model explicitly:
 ```bash
 ./elastic-cli --model gpt-5
 ```
+
+### Optional Web UI
+
+If you prefer a browser-based interface that maintains the same "security terminal" aesthetic:
+
+```bash
+./elastic-cli --webui --port 8080
+```
+
+Open `http://localhost:8080` in your browser to start.
 
 The CLI is tuned to prefer `search_security_events` for typical investigations and only fall back to `search_elastic` when raw DSL control is required.
 
