@@ -10,8 +10,10 @@ const modelInfo = document.getElementById('model-info');
 const connectionStatus = document.getElementById('connection-status');
 const sessionStatus = document.getElementById('session-status');
 const newSessionBtn = document.getElementById('new-session-btn');
+const exportMdBtn = document.getElementById('export-md-btn');
 
 let socket;
+let conversation = [];
 let history = [];
 let historyIndex = -1;
 let currentDraft = '';
@@ -124,13 +126,16 @@ function handleMessage(msg) {
             setThinking(Boolean(msg.thinking), String(msg.content || 'Analyzing request...'));
             break;
         case 'user':
+            conversation.push({ role: 'user', content: msg.content || '' });
             addMessage('user', msg.content || '');
             clearToolState();
             break;
         case 'assistant':
+            conversation.push({ role: 'assistant', content: msg.content || '' });
             addMessage('assistant', msg.content || '');
             break;
         case 'system':
+            conversation.push({ role: 'system', content: msg.content || '' });
             addMessage('system', msg.content || '');
             break;
         case 'error':
@@ -268,10 +273,6 @@ function renderToolList(container, tools, emptyMessage) {
         toggle.type = 'button';
         toggle.className = 'tool-card-toggle';
 
-        const index = document.createElement('span');
-        index.className = 'tool-index';
-        index.textContent = String(tool.seq || 0);
-
         const main = document.createElement('div');
         main.className = 'tool-main';
 
@@ -300,7 +301,6 @@ function renderToolList(container, tools, emptyMessage) {
         chevron.className = 'tool-chevron';
         chevron.textContent = '▶';
 
-        toggle.appendChild(index);
         toggle.appendChild(main);
         toggle.appendChild(chevron);
 
@@ -428,6 +428,7 @@ function startNewSession() {
     }
 
     output.innerHTML = '';
+    conversation = [];
     clearToolState();
     historyIndex = -1;
     currentDraft = '';
@@ -437,12 +438,43 @@ function startNewSession() {
     socket.send(JSON.stringify({ type: 'reset' }));
 }
 
+function exportToMarkdown() {
+    if (conversation.length === 0) {
+        alert('No conversation to export.');
+        return;
+    }
+
+    let md = `# Elastic Security Investigation Export\n\n`;
+    md += `*Exported on: ${new Date().toLocaleString()}*\n\n---\n\n`;
+
+    conversation.forEach((msg) => {
+        const label = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Assistant' : 'System';
+        md += `**${label}:**\n${msg.content}\n\n`;
+    });
+
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    
+    a.href = url;
+    a.download = `investigation-export-${timestamp}.md`;
+    document.body.appendChild(a);
+    a.click();
+    
+    setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }, 0);
+}
+
 inputForm.addEventListener('submit', (event) => {
     event.preventDefault();
     sendUserMessage();
 });
 
 newSessionBtn.addEventListener('click', startNewSession);
+exportMdBtn.addEventListener('click', exportToMarkdown);
 
 loadHistory();
 setupHistoryHandling();

@@ -1,8 +1,14 @@
+
 # Elastic Security MCP Server
 
 An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases with optional local Redis caching to reduce upstream lookups.
 
 This can be used with coding agents (only Gemini has been tested) or the the cli in this project. 
+
+## Elastic Security Assistant (Web UI)
+
+![Elastic Security Web UI](elastic-ndr-webui.png)
+
 
 ## Elastic Security Assistant (CLI)
 
@@ -15,6 +21,9 @@ The project includes a powerful, agentic CLI that acts as a security analyst ass
 - **One-Shot Execution**: Run quick queries and exit using the `--prompt` or `-p` flag.
 - **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
 - **Optional Web UI**: Use the `--webui` flag to start a local web server with a similar look and feel to the terminal experience.
+
+
+
 
 ## Server Tools
 
@@ -116,7 +125,17 @@ If you prefer a browser-based interface that maintains the same "security termin
 
 Open `http://localhost:8080` in your browser to start.
 
-The CLI is tuned to prefer `search_security_events` for typical investigations and only fall back to `search_elastic` when raw DSL control is required.
+The Web UI provides a specialized workspace for security investigations:
+
+- **Interactive Security Console**: A modern, responsive interface designed for deep-dive security analysis.
+- **Dual-Panel Workspace**:
+    - **Investigation Feed**: A real-time conversation stream with the AI analyst. Includes full Markdown support for high-quality reports, data tables, and formatted analysis.
+    - **Execution Trace (Tool Activity)**: A dedicated sidebar that provides visibility into the agent's thought process. Monitor tool calls as they happen, with expandable cards showing input arguments and raw output results.
+- **Real-time Feedback**: Powered by WebSockets to provide immediate updates on tool progress ("Analyzing request", "Running search_security_events", etc.) and streaming responses.
+- **Command History**: Efficiently navigate previous queries using `Up/Down` arrow keys, with history persisted across browser sessions.
+- **Session Management**: Quickly clear context and start fresh investigations with a single click.
+- **Export to Markdown**: Save your entire investigation, including both your queries and the AI's analysis, as a formatted Markdown file for easy documentation or reporting.
+- **Agentic Intelligence**: The same powerful security analyst from the CLI, tuned to prefer structured tools like `search_security_events` for accurate data retrieval.
 
 ### Running the server standalone
 
