@@ -279,7 +279,7 @@ func TestBuildTermQuerySpecialCases(t *testing.T) {
 	if q.QueryString == nil {
 		t.Fatal("expected query_string for CIDR")
 	}
-	if q.QueryString.Query != "source.ip: \"10.0.0.0/8\"" {
+	if q.QueryString.Query != "source.ip: \"10.0.0.0\\/8\"" {
 		t.Errorf("unexpected CIDR query: %s", q.QueryString.Query)
 	}
 

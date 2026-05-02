@@ -14,7 +14,24 @@ import (
 )
 
 func main() {
-	// 1. Logging Setup
+	// 1. Locking Setup
+	lockFile := util.ServerLockFile()
+	lf, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open lock file %s: %v\n", lockFile, err)
+		os.Exit(1)
+	}
+	defer lf.Close()
+
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		fmt.Fprintf(os.Stderr, "another instance of elastic-mcp-server is already running (failed to acquire lock on %s)\n", lockFile)
+		os.Exit(1)
+	}
+	// Write PID to lock file for debugging
+	lf.Truncate(0)
+	fmt.Fprintf(lf, "%d\n", os.Getpid())
+
+	// 2. Logging Setup
 	logFile := util.ServerLogFile()
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)

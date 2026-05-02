@@ -160,7 +160,7 @@ func WrapWithCache[A any](
 			slog.Info("cache hit", "tool", toolName, "key_prefix", key[:8])
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{
-					&mcp.TextContent{Text: text},
+					&mcp.TextContent{Text: "✓ " + text},
 				},
 			}, nil, nil
 		}
@@ -174,7 +174,8 @@ func WrapWithCache[A any](
 		if result != nil && len(result.Content) > 0 {
 			if txt, ok := result.Content[0].(*mcp.TextContent); ok {
 				cache.Set(ctx, key, txt.Text, ttl)
-				slog.Debug("cache stored", "tool", toolName, "key_prefix", key[:8], "ttl_secs", int(ttl.Seconds()))
+				slog.Info("cache stored", "tool", toolName, "key_prefix", key[:8], "ttl_secs", int(ttl.Seconds()))
+				txt.Text = "↓ " + txt.Text
 			}
 		}
 		return result, extra, nil

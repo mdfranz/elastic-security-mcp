@@ -1,3 +1,4 @@
 elastic-mcp-server	
 elastic-cli
 *.log
+elastic-mcp-server.lock
