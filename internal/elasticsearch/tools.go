@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
@@ -34,6 +35,8 @@ type LookupIPArgs struct {
 
 var maxResponseChars int
 
+const defaultToolTimeout = 30 * time.Second
+
 func init() {
 	maxResponseChars = 20000
 	if v := strings.TrimSpace(os.Getenv("MAX_RESPONSE_CHARS")); v != "" {
@@ -45,6 +48,15 @@ func init() {
 
 func MaxResponseChars() int {
 	return maxResponseChars
+}
+
+func ensureToolTimeout(ctx context.Context) context.Context {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultToolTimeout)
+		_ = cancel
+	}
+	return ctx
 }
 
 func truncateResults(result map[string]interface{}) {
@@ -142,6 +154,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	// Register List Indices Tool
 	listHandler := WrapWithCache(cache, "list_indices", ListIndicesTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
+		ctx = ensureToolTimeout(ctx)
 		slog.Info("list_indices called", "pattern", args.Pattern)
 
 		opts := []func(*esapi.CatIndicesRequest){
@@ -206,6 +219,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	// Register Search Tool
 	searchHandler := WrapWithCache(cache, "search_elastic", SearchElasticTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
+		ctx = ensureToolTimeout(ctx)
 		if args.Index == "" {
 			return nil, nil, fmt.Errorf("index is required")
 		}
@@ -236,7 +250,11 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		if searchRes.IsError() {
 			err := HttpError("search", searchRes)
 			slog.Warn("search request failed", "index", args.Index, "error", err)
-			return nil, nil, err
+			errMsg := fmt.Sprintf("%v", err)
+			if strings.Contains(errMsg, "all shards failed") {
+				errMsg += " — index may be unhealthy or missing; try list_indices to verify the index exists"
+			}
+			return nil, nil, fmt.Errorf(errMsg)
 		}
 
 		// Parse the result

@@ -8,6 +8,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"time"
 
 	typedsearch "github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
@@ -61,6 +62,17 @@ var summaryFallbackPaths = []string{
 	"url.full",
 	"tls.client.server_name",
 	"event.original",
+}
+
+const defaultSearchTimeout = 30 * time.Second
+
+func ensureSearchTimeout(ctx context.Context) context.Context {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultSearchTimeout)
+		_ = cancel
+	}
+	return ctx
 }
 
 var sourceIncludes = []string{
@@ -132,6 +144,7 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
 	}
 
+	ctx = ensureSearchTimeout(ctx)
 	req := buildSecuritySearchRequest(args)
 	slog.Info("search_security_events called", "index", args.Index, "size", args.Size, "text", args.Text, "start", args.Start, "end", args.End, "ip", args.IP, "src_ip", args.SrcIP, "dst_ip", args.DstIP, "mac", args.MAC, "domain", args.Domain, "url", args.URL, "dataset", args.Dataset)
 
@@ -141,7 +154,11 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 		Do(ctx)
 	if err != nil {
 		slog.Error("search_security_events error", "index", args.Index, "error", err)
-		return nil, fmt.Errorf("search_security_events error: %w", err)
+		errMsg := fmt.Sprintf("search_security_events error: %v", err)
+		if strings.Contains(err.Error(), "all shards failed") {
+			errMsg += " (all shards failed — index may be unhealthy or missing fields; try with a specific index name or use list_indices to verify)"
+		}
+		return nil, fmt.Errorf(errMsg)
 	}
 
 	if cache != nil {
@@ -328,9 +345,10 @@ func buildTermQuery(field, value string) types.Query {
 	// because the 'term' query does not support CIDR.
 	if (strings.HasSuffix(field, ".ip") || field == "ip" || field == "related.ip") && strings.Contains(value, "/") {
 		if _, _, err := net.ParseCIDR(value); err == nil {
+			escapedValue := escapeQueryStringValue(value)
 			return types.Query{
 				QueryString: &types.QueryStringQuery{
-					Query: fmt.Sprintf("%s: \"%s\"", field, value),
+					Query: fmt.Sprintf("%s: \"%s\"", field, escapedValue),
 				},
 			}
 		}
@@ -350,6 +368,16 @@ func buildTermQuery(field, value string) types.Query {
 			field: {Value: value},
 		},
 	}
+}
+
+func escapeQueryStringValue(value string) string {
+	// Escape special characters for Elasticsearch query_string syntax
+	specialChars := []string{"\\", "\"", "+", "-", "=", "&&", "||", ">", "<", "!", "(", ")", "{", "}", "[", "]", "^", "~", ":", "/"}
+	result := value
+	for _, char := range specialChars {
+		result = strings.ReplaceAll(result, char, "\\"+char)
+	}
+	return result
 }
 
 func buildSecuritySort(hasText bool) []types.SortCombinations {
@@ -578,8 +606,12 @@ func truncateSecuritySearchResults(result map[string]interface{}) {
 		return
 	}
 
+	if len(data) == 0 {
+		return
+	}
+
 	originalCount := len(hits)
-	keepCount := (maxChars * originalCount) / (len(data) + 1)
+	keepCount := (maxChars * originalCount) / len(data)
 	keepCount = (keepCount * 9) / 10
 	if keepCount < 1 {
 		keepCount = 1
@@ -596,4 +628,5 @@ func truncateSecuritySearchResults(result map[string]interface{}) {
 	result["truncated"] = true
 	result["original_size_bytes"] = len(data)
 	result["note"] = fmt.Sprintf("Response truncated from %d to %d hits to stay within context limits.", originalCount, keepCount)
+	slog.Warn("search_security_events results truncated", "original_count", originalCount, "kept_count", keepCount, "size_bytes", len(data), "max_chars", maxChars)
 }
