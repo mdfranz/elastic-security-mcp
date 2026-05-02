@@ -25,7 +25,14 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all for local tool
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // Allow requests without Origin header
+		}
+		return strings.HasPrefix(origin, "http://localhost") ||
+		       strings.HasPrefix(origin, "https://localhost") ||
+		       strings.HasPrefix(origin, "http://127.0.0.1") ||
+		       strings.HasPrefix(origin, "https://127.0.0.1")
 	},
 }
 
@@ -66,7 +73,10 @@ func RunServer(ctx context.Context, session *mcp.ClientSession, client llms.Mode
 		useMemory:  useMemory,
 	}
 
-	assetFS, _ := fs.Sub(assets, "assets")
+	assetFS, err := fs.Sub(assets, "assets")
+	if err != nil {
+		return fmt.Errorf("failed to load embedded assets: %w", err)
+	}
 	http.Handle("/", http.FileServer(http.FS(assetFS)))
 	http.HandleFunc("/ws", s.handleWebSocket)
 

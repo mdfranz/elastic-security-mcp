@@ -1071,8 +1071,6 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 	if err != nil {
 		return nil, nil, nil, "", fmt.Errorf("failed to open log file %s: %w", logFile, err)
 	}
-	// Note: We don't close f here as it's used by the logger throughout the app life
-	// but we could wrap it if needed. For now, following original logic.
 
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: util.ClientLogLevel()}))
 	slog.SetDefault(logger)
