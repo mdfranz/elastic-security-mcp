@@ -93,23 +93,29 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ## Architectural Themes
 
-### 1. **Layered Abstraction**
+### 1. **Client-Server Separation (MCP)**
+The project strictly separates the data-fetching logic from the orchestration logic:
+- **Server-Side**: The MCP server handles Elasticsearch queries, caching, and data normalization. It is completely unaware of the LLM being used.
+- **Client-Side**: The CLI handles user interaction, LLM orchestration, and conversation history. It interacts with the server exclusively via the Model Context Protocol.
+- **Benefits**: This allows the MCP server to be used with other MCP-compatible clients (like Claude Desktop or Gemini) and allows the CLI to potentially talk to multiple MCP servers.
+
+### 2. **Layered Abstraction**
 The project provides multiple levels of access to Elasticsearch:
 - **Raw** (`search_elastic`): Direct Query DSL access.
 - **Typed** (`search_security_events`): Pre-configured filters and boosts for security data.
 - **Cached** (`lookup_domain`, `lookup_ip`): Instant retrieval of observed indicators.
 
-### 2. **Caching and Passive Indexing**
+### 3. **Caching and Passive Indexing**
 Redis serves two purposes:
 - **Result Cache**: Caches the full output of tool calls (e.g., `list_indices`).
 - **Entity Index**: Stores specific security entities (IPs, domains) extracted from search results for fast cross-referencing.
 
-### 3. **Provider-Agnostic Design**
+### 4. **Provider-Agnostic Design**
 The CLI abstracts differences between LLM providers:
 - Common tool definitions across OpenAI, Anthropic, and Gemini.
 - Custom handling for provider-specific features, such as Gemini's `thoughtSignature`.
 
-### 4. **ECS-Centric Tooling**
+### 5. **ECS-Centric Tooling**
 Assumes data follows the Elastic Common Schema:
 - Tools are optimized for fields like `source.ip`, `destination.ip`, and `dns.question.name`.
 - Normalization ensures consistent querying regardless of the underlying data source.

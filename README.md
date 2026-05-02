@@ -1,9 +1,15 @@
 
-# Elastic Security MCP Server
+# Elastic Security MCP
 
-An implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides tools to interact with Elasticsearch, specifically designed for security use cases with optional local Redis caching to reduce upstream lookups.
+This project implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to provide a bridge between Large Language Models and Elasticsearch security data.
 
-This can be used with coding agents (only Gemini has been tested) or the the cli in this project. 
+It consists of two main components:
+1. **Elastic MCP Server**: A standalone server that exposes Elasticsearch tools via the MCP protocol.
+2. **Elastic CLI**: A feature-rich client (TUI and Web UI) that uses the MCP server to provide an AI-powered security analyst experience.
+
+For a detailed look at how these components interact, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Components Overview
 
 ## Elastic Security Assistant (Web UI)
 
@@ -154,15 +160,3 @@ The CLI and Server log to files for debugging:
 You can change the log file locations independently with `CLIENT_LOG_FILE` and `SERVER_LOG_FILE`.
 Set `CLIENT_LOG_LEVEL=debug` or `SERVER_LOG_LEVEL=debug` for more detail in the corresponding process.
 Set `CLIENT_LOG_PAYLOADS=true` only when you explicitly want full CLI request/response payload logging.
-
-## Development
-
-Smoke-test the MCP server tool registration:
-
-```bash
-go run ./cmd/test-mcp
-```
-
-## License
-
-[MIT](LICENSE)
