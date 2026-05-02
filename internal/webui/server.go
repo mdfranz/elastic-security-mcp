@@ -38,13 +38,15 @@ type WebMessage struct {
 }
 
 type ToolEvent struct {
-	ID      string         `json:"id,omitempty"`
-	Seq     int            `json:"seq,omitempty"`
-	Name    string         `json:"name,omitempty"`
-	State   string         `json:"state,omitempty"`
-	Args    map[string]any `json:"args,omitempty"`
-	Result  string         `json:"result,omitempty"`
-	IsError bool           `json:"is_error,omitempty"`
+	ID       string         `json:"id,omitempty"`
+	Seq      int            `json:"seq,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	State    string         `json:"state,omitempty"`
+	Args     map[string]any `json:"args,omitempty"`
+	Result   string         `json:"result,omitempty"`
+	IsError  bool           `json:"is_error,omitempty"`
+	IsCached bool           `json:"is_cached,omitempty"`
+	IsStored bool           `json:"is_stored,omitempty"`
 }
 
 type Server struct {
@@ -180,7 +182,11 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 		for i := range choice.ToolCalls {
 			if choice.ToolCalls[i].ID == "" {
 				b := make([]byte, 8)
-				rand.Read(b)
+				if _, err := rand.Read(b); err != nil {
+					slog.Error("Failed to generate tool call ID", "error", err)
+					s.sendMessage(conn, WebMessage{Type: "error", Content: "Failed to generate tool call ID"})
+					return
+				}
 				choice.ToolCalls[i].ID = hex.EncodeToString(b)
 			}
 			if choice.ToolCalls[i].Type == "" {
@@ -228,7 +234,10 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 				argsJSON := tc.FunctionCall.Arguments
 
 				var args map[string]any
-				json.Unmarshal([]byte(argsJSON), &args)
+				if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+					slog.Warn("Failed to unmarshal tool arguments", "error", err, "args", argsJSON)
+					args = make(map[string]any)
+				}
 				toolEvent := &ToolEvent{
 					ID:    tc.ID,
 					Seq:   i + 1,
@@ -245,12 +254,21 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 
 				resultText := ""
 				isError := false
+				isCached := false
+				isStored := false
 				if err != nil {
 					resultText = fmt.Sprintf("error: %v", err)
 					isError = true
 				} else {
 					resultText = extractToolContent(toolResp)
 					isError = toolResp != nil && toolResp.IsError
+					if strings.HasPrefix(resultText, "✓ ") {
+						isCached = true
+						resultText = strings.TrimPrefix(resultText, "✓ ")
+					} else if strings.HasPrefix(resultText, "↓ ") {
+						isStored = true
+						resultText = strings.TrimPrefix(resultText, "↓ ")
+					}
 				}
 				finalState := "completed"
 				if isError {
@@ -259,13 +277,15 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 				s.sendMessage(conn, WebMessage{
 					Type: "tool",
 					Tool: &ToolEvent{
-						ID:      tc.ID,
-						Seq:     i + 1,
-						Name:    name,
-						State:   finalState,
-						Args:    args,
-						Result:  resultText,
-						IsError: isError,
+						ID:       tc.ID,
+						Seq:      i + 1,
+						Name:     name,
+						State:    finalState,
+						Args:     args,
+						Result:   resultText,
+						IsError:  isError,
+						IsCached: isCached,
+						IsStored: isStored,
 					},
 				})
 

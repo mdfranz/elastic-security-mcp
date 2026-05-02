@@ -117,6 +117,17 @@ function connect() {
     };
 }
 
+let sessionHits = 0;
+let sessionMisses = 0;
+let sessionStore = 0;
+
+function updateCacheStatsUI() {
+    const stats = document.getElementById('cache-stats');
+    if (stats) {
+        stats.textContent = `${sessionHits} hit / ${sessionMisses} miss / ${sessionStore} store`;
+    }
+}
+
 function handleMessage(msg) {
     switch (msg.type) {
         case 'setup':
@@ -143,7 +154,23 @@ function handleMessage(msg) {
             break;
         case 'tool':
             if (msg.tool) {
+                const isNewCompletion = (msg.tool.state === 'completed' || msg.tool.state === 'error') && 
+                                       (!toolIndex.has(msg.tool.id || `${msg.tool.name}-${msg.tool.seq}`) || 
+                                        toolIndex.get(msg.tool.id || `${msg.tool.name}-${msg.tool.seq}`).state === 'running');
+                
                 upsertTool(msg.tool);
+                
+                if (isNewCompletion) {
+                    if (msg.tool.is_cached) {
+                        sessionHits++;
+                    } else {
+                        sessionMisses++;
+                    }
+                    if (msg.tool.is_stored) {
+                        sessionStore++;
+                    }
+                    updateCacheStatsUI();
+                }
             }
             break;
         case 'clear_status':
@@ -231,6 +258,8 @@ function upsertTool(tool) {
         args: tool.args || {},
         result: tool.result || '',
         isError: Boolean(tool.is_error),
+        isCached: Boolean(tool.is_cached),
+        isStored: Boolean(tool.is_stored),
         expanded: existing ? existing.expanded : false,
     };
 
@@ -285,7 +314,12 @@ function renderToolList(container, tools, emptyMessage) {
 
         const state = document.createElement('span');
         state.className = `tool-state ${tool.state}`;
-        state.textContent = tool.state;
+        if (tool.isCached && tool.state === 'completed') {
+            state.textContent = 'cached ✓';
+            state.classList.add('cached');
+        } else {
+            state.textContent = tool.state;
+        }
 
         topLine.appendChild(name);
         topLine.appendChild(state);
@@ -430,6 +464,10 @@ function startNewSession() {
     output.innerHTML = '';
     conversation = [];
     clearToolState();
+    sessionHits = 0;
+    sessionMisses = 0;
+    sessionStore = 0;
+    updateCacheStatsUI();
     historyIndex = -1;
     currentDraft = '';
     userInput.value = '';

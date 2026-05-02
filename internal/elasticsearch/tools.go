@@ -254,7 +254,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 			if strings.Contains(errMsg, "all shards failed") {
 				errMsg += " — index may be unhealthy or missing; try list_indices to verify the index exists"
 			}
-			return nil, nil, fmt.Errorf(errMsg)
+			return nil, nil, fmt.Errorf("%s", errMsg)
 		}
 
 		// Parse the result

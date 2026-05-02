@@ -387,7 +387,8 @@ body::before {
     background: rgba(209, 141, 47, 0.14);
 }
 
-.tool-state.completed {
+.tool-state.completed,
+.tool-state.cached {
     color: #9bf4cb;
     background: rgba(82, 208, 156, 0.12);
 }

@@ -10,6 +10,7 @@ import (
 const (
 	DefaultClientLogFile     = "elastic-cli.log"
 	DefaultServerLogFile     = "elastic-mcp-server.log"
+	DefaultServerLockFile    = "elastic-mcp-server.lock"
 	DefaultClientHistoryFile = ".elastic-cli-history"
 )
 
@@ -25,6 +26,13 @@ func ServerLogFile() string {
 		return logFile
 	}
 	return DefaultServerLogFile
+}
+
+func ServerLockFile() string {
+	if lockFile := strings.TrimSpace(os.Getenv("SERVER_LOCK_FILE")); lockFile != "" {
+		return lockFile
+	}
+	return DefaultServerLockFile
 }
 
 func ClientHistoryFile() string {
