@@ -75,11 +75,23 @@ see [PKG.md](PKG.md) for detailed list.
 
 - Go 1.26.2 or higher
 - Access to an Elasticsearch cluster (URL and API Key)
-- Redis server (running on `localhost:6379` by default) for caching and lookup tools
+- Redis server for caching and lookup tools:
+  - Default: `localhost:6379`
+  - Recommended: Run via Podman (see below)
 - At least one LLM API key for the CLI:
   - `OPENAI_API_KEY`
   - `ANTHROPIC_API_KEY`
   - `GEMINI_API_KEY`
+
+## Infrastructure Setup
+
+To start the required Redis instance using Podman:
+
+```bash
+make redis-up
+```
+
+This uses `podman compose` to start an alpine-based Redis container with persistence enabled. You can monitor logs with `make redis-logs` or access the CLI with `make redis-shell`.
 
 ## Installation
 

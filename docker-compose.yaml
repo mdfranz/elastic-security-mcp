@@ -1,0 +1,13 @@
+services:
+  redis:
+    image: docker.io/library/redis:alpine
+    container_name: elastic-security-redis
+    ports:
+      - "6379:6379"
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

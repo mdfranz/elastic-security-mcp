@@ -1,7 +1,8 @@
 BINARY_NAME=elastic-mcp-server
 CLI_NAME=elastic-cli
+COMPOSE=podman compose
 
-.PHONY: all build build-cli clean run run-cli
+.PHONY: all build build-cli clean run run-cli redis-up redis-down redis-logs redis-shell
 
 all: build build-cli
 
@@ -20,3 +21,15 @@ run: build
 
 run-cli: build build-cli
 	./$(CLI_NAME)
+
+redis-up:
+	$(COMPOSE) up -d
+
+redis-down:
+	$(COMPOSE) down
+
+redis-logs:
+	$(COMPOSE) logs -f
+
+redis-shell:
+	podman exec -it elastic-security-redis redis-cli
