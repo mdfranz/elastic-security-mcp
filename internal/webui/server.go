@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/memory"
@@ -164,12 +165,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]llms.MessageContent, connMem *memory.ConversationBuffer, lastUserInput string) {
 	for {
 		s.sendMessage(conn, WebMessage{Type: "status", Content: "Analyzing request...", Thinking: true})
+		slog.Info("LLM request", "history_len", len(*history), "model", s.modelName)
+		resp, err := util.WithRetry(ctx, func() (*llms.ContentResponse, error) {
+			return s.llmClient.GenerateContent(ctx, *history,
+				llms.WithTools(s.lcTools),
+				llms.WithMaxTokens(4096),
+				llms.WithTemperature(0),
+			)
+		})
 
-		resp, err := s.llmClient.GenerateContent(ctx, *history,
-			llms.WithTools(s.lcTools),
-			llms.WithMaxTokens(4096),
-			llms.WithTemperature(0),
-		)
 
 		if err != nil {
 			s.sendMessage(conn, WebMessage{Type: "error", Content: fmt.Sprintf("LLM error: %v", err)})

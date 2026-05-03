@@ -643,11 +643,13 @@ func (m model) generateResponse() tea.Cmd {
 			}
 		}
 
-		resp, err := m.llmClient.GenerateContent(m.ctx, m.history,
-			llms.WithTools(m.lcTools),
-			llms.WithMaxTokens(4096),
-			llms.WithTemperature(0),
-		)
+		resp, err := util.WithRetry(m.ctx, func() (*llms.ContentResponse, error) {
+			return m.llmClient.GenerateContent(m.ctx, m.history,
+				llms.WithTools(m.lcTools),
+				llms.WithMaxTokens(4096),
+				llms.WithTemperature(0),
+			)
+		})
 		if err != nil {
 			var gerr *googleapi.Error
 			if errors.As(err, &gerr) {
@@ -958,7 +960,9 @@ func runSinglePrompt(modelFlag string, prompt string) {
 	}
 
 	for {
-		resp, err := llmClient.GenerateContent(ctx, history, llms.WithTools(lcTools))
+		resp, err := util.WithRetry(ctx, func() (*llms.ContentResponse, error) {
+			return llmClient.GenerateContent(ctx, history, llms.WithTools(lcTools))
+		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
 			os.Exit(1)

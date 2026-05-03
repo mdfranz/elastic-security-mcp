@@ -165,22 +165,42 @@ func (g *geminiModel) GenerateContent(ctx context.Context, messages []llms.Messa
 	}
 
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", opts.Model, g.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	
+	type responseTuple struct {
+		resp *http.Response
+		body []byte
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	resTuple, err := util.WithRetry(ctx, func() (responseTuple, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return responseTuple{}, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	respBody, err := io.ReadAll(resp.Body)
+		resp, err := g.httpClient.Do(req)
+		if err != nil {
+			return responseTuple{}, err
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return responseTuple{}, err
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return responseTuple{}, fmt.Errorf("Gemini API rate limit: %s", string(respBody))
+		}
+
+		return responseTuple{resp: resp, body: respBody}, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
+	resp := resTuple.resp
+	respBody := resTuple.body
 
 	slog.Debug("Raw Gemini HTTP response",
 		"model", opts.Model,
