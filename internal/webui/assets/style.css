@@ -217,6 +217,7 @@ body::before {
     border: 1px solid rgba(96, 126, 160, 0.16);
     background: rgba(7, 13, 21, 0.82);
     line-height: 1.6;
+    flex-shrink: 0;
 }
 
 .message-header {
@@ -319,6 +320,7 @@ body::before {
     border-radius: 14px;
     background: rgba(6, 11, 18, 0.86);
     overflow: hidden;
+    flex-shrink: 0;
 }
 
 .tool-card.is-running {
