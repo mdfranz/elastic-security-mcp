@@ -1158,8 +1158,8 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 			}
 		case "Gemini":
 			modelItems = []list.Item{
-				item{title: "gemini-3-flash-preview", desc: ""},
-				item{title: "gemini-3.1-pro-preview", desc: ""},
+				item{title: "gemini-3.1-pro-preview", desc: "Preferred Gemini Pro model"},
+				item{title: "gemini-3-flash-preview", desc: "Fast Gemini Flash model"},
 				item{title: "Custom...", desc: ""},
 			}
 		}

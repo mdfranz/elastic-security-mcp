@@ -120,11 +120,12 @@ function connect() {
 let sessionHits = 0;
 let sessionMisses = 0;
 let sessionStore = 0;
+let sessionErrors = 0;
 
 function updateCacheStatsUI() {
     const stats = document.getElementById('cache-stats');
     if (stats) {
-        stats.textContent = `${sessionHits} hit / ${sessionMisses} miss / ${sessionStore} store`;
+        stats.textContent = `${sessionHits} hit / ${sessionMisses} miss / ${sessionStore} store / ${sessionErrors} error`;
     }
 }
 
@@ -168,6 +169,9 @@ function handleMessage(msg) {
                     }
                     if (msg.tool.is_stored) {
                         sessionStore++;
+                    }
+                    if (msg.tool.is_error) {
+                        sessionErrors++;
                     }
                     updateCacheStatsUI();
                 }
@@ -467,6 +471,7 @@ function startNewSession() {
     sessionHits = 0;
     sessionMisses = 0;
     sessionStore = 0;
+    sessionErrors = 0;
     updateCacheStatsUI();
     historyIndex = -1;
     currentDraft = '';
