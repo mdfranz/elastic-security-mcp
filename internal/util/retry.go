@@ -19,9 +19,10 @@ func IsRateLimitError(err error) bool {
 		strings.Contains(msg, "overloaded")
 }
 
-// WithRetry executes the given function with exponential backoff if it returns a rate limit error.
+// WithRetry executes the given function with exponential backoff on rate limit errors.
+// It retries up to maxRetries times with exponential backoff before returning the error.
 func WithRetry[T any](ctx context.Context, fn func() (T, error)) (T, error) {
-	maxRetries := 5
+	const maxRetries = 5
 	backoff := 2 * time.Second
 
 	for i := 0; i < maxRetries; i++ {
@@ -34,11 +35,10 @@ func WithRetry[T any](ctx context.Context, fn func() (T, error)) (T, error) {
 			return res, err
 		}
 
-		slog.Warn("Rate limit hit, retrying...", 
-			"attempt", i+1, 
-			"max_retries", maxRetries, 
-			"backoff", backoff, 
-			"error", err,
+		slog.Warn("Rate limit hit, retrying...",
+			"attempt", i+1,
+			"max_retries", maxRetries,
+			"backoff", backoff,
 		)
 
 		select {
@@ -49,5 +49,12 @@ func WithRetry[T any](ctx context.Context, fn func() (T, error)) (T, error) {
 		}
 	}
 
-	return fn() // Final attempt
+	res, err := fn()
+	if err != nil && IsRateLimitError(err) {
+		slog.Warn("Rate limit persists after retries",
+			"attempts", maxRetries+1,
+			"error", err,
+		)
+	}
+	return res, err
 }

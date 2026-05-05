@@ -27,21 +27,19 @@ func main() {
 	defer lf.Close()
 
 	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		// Read PID if possible to give a better error message
 		pidData, _ := os.ReadFile(lockFile)
 		pidStr := strings.TrimSpace(string(pidData))
 		if pidStr != "" {
 			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-				// Check if process is still running (cross-platform safe enough for Linux/macOS)
 				if proc, err := os.FindProcess(pid); err == nil {
 					if err := proc.Signal(syscall.Signal(0)); err == nil {
-						fmt.Fprintf(os.Stderr, "Error: another instance of elastic-mcp-server (PID %d) is already running.\n", pid)
+						fmt.Fprintf(os.Stderr, "Error: elastic-mcp-server (PID %d) is already running.\n", pid)
 						os.Exit(1)
 					}
 				}
 			}
 		}
-		fmt.Fprintf(os.Stderr, "Error: another instance of elastic-mcp-server is already running (lock held on %s).\n", lockFile)
+		fmt.Fprintf(os.Stderr, "Error: elastic-mcp-server is already running (lock on %s).\n", lockFile)
 		os.Exit(1)
 	}
 

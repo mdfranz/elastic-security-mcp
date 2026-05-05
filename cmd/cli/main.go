@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -44,6 +46,7 @@ ALWAYS use Markdown tables for tabular data.`
 
 const maxLoggedPayloadChars = 4000
 const maxHistoryMessages = 15
+const footerReserveLines = 9
 
 // Styles
 var (
@@ -61,12 +64,30 @@ var (
 			Foreground(lipgloss.Color("#5F00FF"))
 
 	toolStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#00D787")).
+			Bold(true)
+
+	toolJSONStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#878787")).
 			Italic(true)
 
 	statusStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#B85F00"))
+
+	dividerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#5F87AF"))
+
+	footerLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6D7E97"))
+
+	footerValueStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#E6EEF8"))
+
+	footerSeparatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#5F87AF"))
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF0000"))
@@ -84,10 +105,22 @@ type executeToolsMsg struct {
 	toolCalls []llms.ToolCall
 }
 type toolsResultMsg struct {
-	results []llms.ContentPart
+	results  []llms.ContentPart
+	outcomes []toolOutcome
 }
 type errMsg struct {
 	err error
+}
+
+type toolOutcome struct {
+	isCached bool
+	isStored bool
+	isError  bool
+}
+
+type exportMessage struct {
+	role    string
+	content string
 }
 
 type focusArea int
@@ -118,16 +151,22 @@ type model struct {
 	isDark    bool
 	focus     focusArea
 
-	messages   []string
-	isThinking bool
-	statusText string
-	err        error
-	ready      bool
+	messages     []string
+	conversation []exportMessage
+	isThinking   bool
+	statusText   string
+	toolCalls    int
+	cacheHits    int
+	cacheMisses  int
+	cacheStores  int
+	toolErrors   int
+	err          error
+	ready        bool
 }
 
 func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.Model, tools []llms.Tool, modelName string, useMemory bool) model {
 	ti := textinput.New()
-	ti.Placeholder = "Ask about security data... (Up/Down history, PgUp/PgDn scroll)"
+	ti.Placeholder = "Ask about security data..."
 	ti.Focus()
 	ti.CharLimit = 1024
 	ti.Width = 80
@@ -168,11 +207,7 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.M
 				Parts: []llms.ContentPart{llms.TextContent{Text: systemPrompt}},
 			},
 		},
-		messages: []string{
-			titleStyle.Render("Elastic Security Assistant"),
-			systemStyle.Render(fmt.Sprintf("Model: %s", modelName)),
-			"",
-		},
+		messages: []string{},
 	}
 }
 
@@ -189,6 +224,146 @@ func (m *model) refreshViewport(follow bool) {
 	if shouldFollow {
 		m.viewport.GotoBottom()
 	}
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func dividerLine(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return strings.Repeat(lipgloss.NormalBorder().Top, width)
+}
+
+func exportLabel(role string) string {
+	switch role {
+	case "user":
+		return "You"
+	case "assistant":
+		return "Assistant"
+	case "system":
+		return "System"
+	default:
+		return role
+	}
+}
+
+func buildMarkdownExport(conversation []exportMessage, exportedAt time.Time) string {
+	var b strings.Builder
+	b.WriteString("# Elastic Security Investigation Export\n\n")
+	b.WriteString(fmt.Sprintf("*Exported on: %s*\n\n---\n\n", exportedAt.Format(time.RFC1123)))
+	for _, msg := range conversation {
+		b.WriteString(fmt.Sprintf("**%s:**\n%s\n\n", exportLabel(msg.role), msg.content))
+	}
+	return b.String()
+}
+
+func exportFilename(now time.Time) string {
+	return fmt.Sprintf("investigation-export-%s.md", now.Format("2006-01-02T15-04-05"))
+}
+
+func normalizeMarkdownForTerminal(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == "" {
+			continue
+		}
+
+		hashes := 0
+		for hashes < len(trimmed) && hashes < 6 && trimmed[hashes] == '#' {
+			hashes++
+		}
+		if hashes == 0 || hashes >= len(trimmed) || trimmed[hashes] != ' ' {
+			continue
+		}
+
+		indent := len(line) - len(trimmed)
+		lines[i] = strings.Repeat(" ", indent) + strings.TrimSpace(trimmed[hashes:])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeToolResultText(text string) (clean string, isCached bool, isStored bool) {
+	switch {
+	case strings.HasPrefix(text, "✓ "):
+		return strings.TrimPrefix(text, "✓ "), true, false
+	case strings.HasPrefix(text, "↓ "):
+		return strings.TrimPrefix(text, "↓ "), false, true
+	default:
+		return text, false, false
+	}
+}
+
+func (m *model) appendConversation(role, content string) {
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+	m.conversation = append(m.conversation, exportMessage{
+		role:    role,
+		content: content,
+	})
+}
+
+func (m *model) exportConversation() error {
+	if len(m.conversation) == 0 {
+		return errors.New("no conversation to export")
+	}
+
+	now := time.Now()
+	filename := exportFilename(now)
+	path, err := filepath.Abs(filename)
+	if err != nil {
+		return fmt.Errorf("resolve export path: %w", err)
+	}
+
+	md := buildMarkdownExport(m.conversation, now)
+	if err := os.WriteFile(path, []byte(md), 0644); err != nil {
+		return fmt.Errorf("write export: %w", err)
+	}
+
+	m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Export saved:"), path))
+	return nil
+}
+
+func footerMetaSegment(label string, value any) string {
+	return footerLabelStyle.Render(label+": ") + footerValueStyle.Render(fmt.Sprint(value))
+}
+
+func (m model) renderFooterMetaLine(width int) string {
+	session := "Ready"
+	if m.isThinking {
+		session = "Investigating"
+	}
+
+	memoryState := "Off"
+	if m.useMemory {
+		memoryState = "On"
+	}
+
+	parts := []string{
+		footerMetaSegment("Session", session),
+		footerMetaSegment("Model", m.modelName),
+		footerMetaSegment("Memory", memoryState),
+		footerMetaSegment("Tools", m.toolCalls),
+		footerMetaSegment("Cache", fmt.Sprintf("%d hit / %d miss / %d store / %d error", m.cacheHits, m.cacheMisses, m.cacheStores, m.toolErrors)),
+	}
+
+	line := strings.Join(parts, footerSeparatorStyle.Render("  "))
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }
 
 func summarizeToolCalls(toolCalls []llms.ToolCall) string {
@@ -332,7 +507,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pushInputHistory(input)
 				m.textInput.SetValue("")
 				if !m.useMemory {
-					m.messages = append(m.messages, systemStyle.Render("Conversation memory is disabled."))
+					msg := "Conversation memory is disabled."
+					m.messages = append(m.messages, systemStyle.Render(msg))
+					m.appendConversation("system", msg)
 				} else {
 					vars, err := m.mem.LoadMemoryVariables(m.ctx, nil)
 					if err != nil {
@@ -342,8 +519,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if hist == "" {
 							hist = "(empty)"
 						}
+						msg := fmt.Sprintf("Conversation Memory:\n%s", hist)
 						m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Conversation Memory:"), hist))
+						m.appendConversation("system", msg)
 					}
+				}
+				m.refreshViewport(true)
+				return m, nil
+			}
+
+			if input == "/export" {
+				m.pushInputHistory(input)
+				m.textInput.SetValue("")
+				if err := m.exportConversation(); err != nil {
+					m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Export error: %v", err)))
 				}
 				m.refreshViewport(true)
 				return m, nil
@@ -352,6 +541,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Wrap human input
 			wrappedUser := lipgloss.NewStyle().Width(m.viewport.Width - 10).Render(input)
 			m.messages = append(m.messages, fmt.Sprintf("%s %s", userStyle.Render("You:"), wrappedUser))
+			m.appendConversation("user", input)
 
 			m.history = append(m.history, llms.MessageContent{
 				Role:  llms.ChatMessageTypeHuman,
@@ -374,13 +564,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, msg.Height-8)
+			m.viewport = viewport.New(msg.Width, msg.Height-footerReserveLines)
 			m.viewport.HighPerformanceRendering = false
 			m.viewport.SetContent(strings.Join(m.messages, "\n"))
 			m.ready = true
 		} else {
 			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - 8
+			m.viewport.Height = msg.Height - footerReserveLines
 		}
 		// Update renderer width without re-querying terminal
 		style := "light"
@@ -456,18 +646,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Display content if any
 		if choice.Content != "" && len(choice.ToolCalls) == 0 {
-			rendered, err := m.renderer.Render(choice.Content)
+			rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(choice.Content))
 			if err != nil {
 				rendered = choice.Content
 			}
 			m.messages = append(m.messages, fmt.Sprintf("%s\n%s", assistantStyle.Render("Assistant:"), rendered))
+			m.appendConversation("assistant", choice.Content)
 		}
 
 		// Handle tool calls
 		if len(choice.ToolCalls) > 0 {
 			m.statusText = summarizeToolCalls(choice.ToolCalls) + " Tool lines above are intermediate."
 			for _, tc := range choice.ToolCalls {
-				m.messages = append(m.messages, toolStyle.Copy().Width(m.viewport.Width-4).Render(fmt.Sprintf("  [%s] args: %s", toolCallName(tc), toolCallArguments(tc))))
+				header := toolStyle.Render(fmt.Sprintf("[%s] args:", toolCallName(tc)))
+				body := toolJSONStyle.Copy().Width(m.viewport.Width).Render(formatToolCallArguments(tc))
+				m.messages = append(m.messages, header+"\n"+body+"\n")
 			}
 			m.refreshViewport(false)
 			return m, m.executeTools(choice.ToolCalls)
@@ -495,6 +688,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Parts: []llms.ContentPart{res},
 			})
 		}
+		for _, outcome := range msg.outcomes {
+			m.toolCalls++
+			if outcome.isCached {
+				m.cacheHits++
+			} else {
+				m.cacheMisses++
+			}
+			if outcome.isStored {
+				m.cacheStores++
+			}
+			if outcome.isError {
+				m.toolErrors++
+			}
+		}
 		m.statusText = "Tool results received. Drafting final answer..."
 		m.refreshViewport(false)
 		return m, m.generateResponse()
@@ -519,15 +726,24 @@ func (m model) View() string {
 	}
 
 	var s string
-	s += m.viewport.View() + "\n\n\n\n"
-	if m.isThinking {
-		status := m.statusText
-		if status == "" {
+	width := m.viewport.Width
+	s += m.viewport.View() + "\n\n"
+	s += dividerStyle.Render(dividerLine(width)) + "\n"
+	s += m.renderFooterMetaLine(width) + "\n"
+
+	status := m.statusText
+	if status == "" {
+		if m.isThinking {
 			status = "Thinking..."
+		} else {
+			status = "Ready for the next investigation."
 		}
-		s += statusStyle.Render(m.spinner.View()+" "+status) + "\n"
+	}
+	if m.isThinking {
+		prefix := m.spinner.View() + " "
+		s += statusStyle.Render(prefix+truncateRunes(status, width-lipgloss.Width(prefix))) + "\n"
 	} else {
-		s += "\n"
+		s += statusStyle.Render(truncateRunes(status, width)) + "\n"
 	}
 
 	help := "Up/Down: history  PgUp/PgDn: scroll  TAB: focus output"
@@ -555,6 +771,88 @@ func toolCallArguments(tc llms.ToolCall) string {
 		return "{}"
 	}
 	return tc.FunctionCall.Arguments
+}
+
+func formatToolCallArguments(tc llms.ToolCall) string {
+	raw := toolCallArguments(tc)
+	if raw == "{}" {
+		return raw
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return raw
+	}
+
+	// Try to expand any inner JSON strings (e.g. for search_elastic query)
+	for k, v := range parsed {
+		if s, ok := v.(string); ok {
+			s = strings.TrimSpace(s)
+			if (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+				(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
+				var inner any
+				if err := json.Unmarshal([]byte(s), &inner); err == nil {
+					parsed[k] = inner
+				}
+			}
+		}
+	}
+
+	formatted, err := json.MarshalIndent(parsed, "", " ")
+	if err != nil {
+		return raw
+	}
+
+	lines := strings.Split(string(formatted), "\n")
+	if len(lines) <= 1 {
+		return string(formatted)
+	}
+
+	var result []string
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// If this line is just a closing brace/bracket, append it to the previous line
+		if (trimmed == "}" || trimmed == "}," || trimmed == "]" || trimmed == "],") && len(result) > 0 {
+			result[len(result)-1] += " " + trimmed
+			continue
+		}
+
+		// Look ahead: if the next line is a closing brace/bracket, pull it up now
+		// Or if this line ends with { or [ and the next line is content, we can potentially join,
+		// but the user specifically wanted the braces themselves to not have their own lines.
+
+		// If current line ends with { or [ and is not the last line
+		if (strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "[")) && i+1 < len(lines) {
+			nextLine := strings.TrimSpace(lines[i+1])
+			// If next line is a closing one, join them: "key": {}
+			if nextLine == "}" || nextLine == "}," || nextLine == "]" || nextLine == "]," {
+				result = append(result, line+" "+nextLine)
+				i++ // skip next
+				continue
+			}
+			// Otherwise, join the next line to this one to start the content immediately
+			result = append(result, line+" "+nextLine)
+			i++ // skip next line as it's now part of this one
+			continue
+		}
+
+		result = append(result, line)
+	}
+
+	// Final pass to catch any remaining standalone closures that might have been shifted
+	var final []string
+	for _, line := range result {
+		trimmed := strings.TrimSpace(line)
+		if (trimmed == "}" || trimmed == "}," || trimmed == "]" || trimmed == "],") && len(final) > 0 {
+			final[len(final)-1] += " " + trimmed
+		} else {
+			final = append(final, line)
+		}
+	}
+
+	return strings.Join(final, "\n")
 }
 
 func extractToolContent(toolResp *mcp.CallToolResult) string {
@@ -687,6 +985,7 @@ func (m model) generateResponse() tea.Cmd {
 func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		toolResultParts := []llms.ContentPart{}
+		outcomes := make([]toolOutcome, 0, len(toolCalls))
 		for _, tc := range toolCalls {
 			name := toolCallName(tc)
 			argsJSON := toolCallArguments(tc)
@@ -741,6 +1040,12 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 					"result_preview", util.TruncateForLog(resultText, 500),
 				)
 			}
+			resultText, isCached, isStored := normalizeToolResultText(resultText)
+			outcomes = append(outcomes, toolOutcome{
+				isCached: isCached,
+				isStored: isStored,
+				isError:  err != nil || (toolResp != nil && toolResp.IsError),
+			})
 
 			toolResultParts = append(toolResultParts, llms.ToolCallResponse{
 				ToolCallID: tc.ID,
@@ -748,7 +1053,7 @@ func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
 				Content:    resultText,
 			})
 		}
-		return toolsResultMsg{toolResultParts}
+		return toolsResultMsg{results: toolResultParts, outcomes: outcomes}
 	}
 }
 
@@ -800,6 +1105,53 @@ func (m modelSelector) View() string {
 		return ""
 	}
 	return "\n" + m.list.View()
+}
+
+func configureSelectorList(items []list.Item, title string, width, height int) list.Model {
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.
+		Foreground(lipgloss.Color("#A8A8A8"))
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.
+		Foreground(lipgloss.Color("#6D7E97"))
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
+		Bold(true).
+		Foreground(lipgloss.Color("#00D7D7")).
+		BorderForeground(lipgloss.Color("#005FB8"))
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
+		Foreground(lipgloss.Color("#8FB7D8")).
+		BorderForeground(lipgloss.Color("#005FB8"))
+	delegate.Styles.DimmedTitle = delegate.Styles.DimmedTitle.
+		Foreground(lipgloss.Color("#6D7E97"))
+	delegate.Styles.DimmedDesc = delegate.Styles.DimmedDesc.
+		Foreground(lipgloss.Color("#5C6A7C"))
+	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.
+		Bold(true).
+		Foreground(lipgloss.Color("#00D7D7"))
+
+	l := list.New(items, delegate, width, height)
+	l.Title = title
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.Styles.Title = titleStyle
+	l.Styles.TitleBar = l.Styles.TitleBar.
+		PaddingLeft(0).
+		PaddingBottom(1)
+	l.Styles.PaginationStyle = l.Styles.PaginationStyle.
+		Foreground(lipgloss.Color("#6D7E97"))
+	l.Styles.HelpStyle = l.Styles.HelpStyle.
+		Foreground(lipgloss.Color("#6D7E97"))
+	l.Styles.ActivePaginationDot = l.Styles.ActivePaginationDot.
+		Foreground(lipgloss.Color("#00D7D7"))
+	l.Styles.InactivePaginationDot = l.Styles.InactivePaginationDot.
+		Foreground(lipgloss.Color("#5C6A7C"))
+	l.Styles.DividerDot = l.Styles.DividerDot.
+		Foreground(lipgloss.Color("#005FB8"))
+	l.Styles.StatusEmpty = l.Styles.StatusEmpty.
+		Foreground(lipgloss.Color("#6D7E97"))
+	l.Styles.NoItems = l.Styles.NoItems.
+		Foreground(lipgloss.Color("#6D7E97"))
+
+	return l
 }
 
 func modelProvider(modelName string) string {
@@ -1118,11 +1470,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 		// Only ask for provider if more than one is available
 		selectedProvider := ""
 		if len(providerItems) > 1 {
-			l := list.New(providerItems, list.NewDefaultDelegate(), 40, 10)
-			l.Title = "Select Provider"
-			l.SetShowStatusBar(false)
-			l.SetFilteringEnabled(false)
-			l.Styles.Title = titleStyle
+			l := configureSelectorList(providerItems, "Select Provider", 40, 10)
 
 			m := modelSelector{list: l}
 			p := tea.NewProgram(m)
@@ -1144,16 +1492,16 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 		switch selectedProvider {
 		case "OpenAI":
 			modelItems = []list.Item{
-				item{title: "gpt-5", desc: ""},
-				item{title: "gpt-5-mini", desc: ""},
-				item{title: "gpt-5-nano", desc: ""},
+				item{title: "gpt-5", desc: "Most advanced OpenAI model"},
+				item{title: "gpt-5-mini", desc: "Efficient OpenAI model"},
+				item{title: "gpt-5-nano", desc: "Lightweight OpenAI model"},
 				item{title: "Custom...", desc: ""},
 			}
 		case "Anthropic":
 			modelItems = []list.Item{
-				item{title: "claude-sonnet-4-6", desc: ""},
-				item{title: "claude-haiku-4-5", desc: ""},
-				item{title: "claude-opus-4-6", desc: ""},
+				item{title: "claude-opus-4-6", desc: "Most capable Claude model"},
+				item{title: "claude-sonnet-4-6", desc: "Balanced performance and speed"},
+				item{title: "claude-haiku-4-5", desc: "Fastest Claude model"},
 				item{title: "Custom...", desc: ""},
 			}
 		case "Gemini":
@@ -1164,11 +1512,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 			}
 		}
 
-		l := list.New(modelItems, list.NewDefaultDelegate(), 40, 12)
-		l.Title = fmt.Sprintf("Select %s Model", selectedProvider)
-		l.SetShowStatusBar(false)
-		l.SetFilteringEnabled(false)
-		l.Styles.Title = titleStyle
+		l := configureSelectorList(modelItems, fmt.Sprintf("Select %s Model", selectedProvider), 40, 12)
 
 		m := modelSelector{list: l}
 		p := tea.NewProgram(m)

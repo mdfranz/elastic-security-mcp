@@ -15,6 +15,7 @@ build-cli:
 clean:
 	rm -f $(BINARY_NAME) $(CLI_NAME)
 	rm -f *.log
+	rm -f investigation-*.md investigation-export-*.md
 
 run: build
 	./$(BINARY_NAME)
