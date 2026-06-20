@@ -52,9 +52,15 @@ The MCP server provides the following tools to any compatible host:
 
 - **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
 - **search_security_events**: Structured, snippets-first search for ECS-style Zeek and Suricata data with typed filters (`text`, `start`, `end`, `ip`, `src_ip`, `dst_ip`, `domain`, `url`, `dataset`), boosted network fields, and highlighting.
+- **search_security_alerts**: Search Elastic Security detection alerts stored in `.alerts-security.alerts-*` indices, filtering by query, severity, rule name, host, and time range. Projects key process execution details.
 - **lookup_domain**: Check local Redis cache for DNS activity history for a specific domain name. Returns recent DNS queries, source IPs, and resolved addresses from previously observed traffic.
 - **lookup_ip**: Check local Redis cache for any observed activity involving an IP address. Returns DNS records where this IP appeared as an answer and DNS queries made by this IP as a source.
 - **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries.
+- **kibana_api_request**: Execute an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) against any Kibana REST API endpoint (only available if `KIBANA_URL` is set).
+- **list_kibana_spaces**: List all available spaces in Kibana (only available if `KIBANA_URL` is set).
+- **list_detection_rules**: Retrieve a paginated list of detection rules from the Elastic Security app (only available if `KIBANA_URL` is set).
+- **get_detection_rule**: Get details of a specific detection rule by ID or rule_id (only available if `KIBANA_URL` is set).
+- **list_agents**: Retrieve Elastic Agents from Fleet using the Kibana Fleet API (only available if `KIBANA_URL` is set).
 
 ## Key Libraries
 
@@ -116,6 +122,11 @@ The CLI also requires one of the following, depending on the model you choose:
 
 Optional variables:
 
+- `KIBANA_URL`: The URL of your Kibana instance (e.g. `http://localhost:5601`). Required to enable the Kibana tools.
+- `KIBANA_USER`: Optional. The username for Basic Auth (defaults to `elastic`).
+- `KIBANA_PASS`: Optional. The password for Basic Auth.
+- `KIBANA_KEY`: Optional. A Kibana API Key for authentication.
+- `KIBANA_SPACE`: Optional. The Kibana Space ID (e.g. `default` or `marketing`) to query.
 - `ELASTIC_MODEL`: Default CLI model ID if you do not pass `--model`.
 - `ELASTIC_MCP_SERVER`: Path to the MCP server binary for the CLI and smoke-test client.
 - `CLIENT_LOG_FILE`: Log file path for the CLI. Default is `elastic-cli.log`.
@@ -158,6 +169,30 @@ The server communicates over Standard Input/Output (stdio) and can be used with 
 
 ```bash
 ./elastic-mcp-server
+```
+
+### Integrating with external MCP Clients (Claude Desktop, Cursor, etc.)
+
+A template configuration is available in `.mcp.json`. You can copy or reference this file to configure external MCP hosts (like Claude Desktop or Cursor).
+
+For example, to configure the server in **Claude Desktop**, edit `~/.config/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and include the server definition from `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "elastic-security-mcp": {
+      "command": "/absolute/path/to/elastic-mcp-server",
+      "args": [],
+      "env": {
+        "ELASTIC_URL": "https://your-elasticsearch-endpoint",
+        "ELASTIC_KEY": "your-elasticsearch-api-key",
+        "KIBANA_URL": "https://your-kibana-endpoint",
+        "KIBANA_USER": "elastic",
+        "KIBANA_PASS": "your-kibana-password"
+      }
+    }
+  }
+}
 ```
 
 ## Troubleshooting
