@@ -25,6 +25,21 @@ func TestNormalizeJSON(t *testing.T) {
 			input:    `{"b": 1, "a": 2}`,
 			expected: `{"a":2,"b":1}`,
 		},
+		{
+			name:     "fix quoted timestamp key",
+			input:    `{"query":{"range":{"\"@timestamp\"":{"gte":"now-24h"}}}}`,
+			expected: `{"query":{"range":{"@timestamp":{"gte":"now-24h"}}}}`,
+		},
+		{
+			name:     "fix quoted key nested in sort",
+			input:    `{"sort":[{"\"@timestamp\"":{"order":"desc"}}]}`,
+			expected: `{"sort":[{"@timestamp":{"order":"desc"}}]}`,
+		},
+		{
+			name:     "normal keys unchanged",
+			input:    `{"query":{"match":{"host.name":"myhost"}}}`,
+			expected: `{"query":{"match":{"host.name":"myhost"}}}`,
+		},
 	}
 
 	for _, tt := range tests {

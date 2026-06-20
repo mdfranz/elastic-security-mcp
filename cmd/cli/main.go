@@ -37,10 +37,19 @@ const systemPrompt = `You are a silent Elastic Security analyst tool.
 YOUR ONLY JOB IS TO CALL TOOLS.
 NEVER explain what you are doing.
 NEVER say "I will search" or "Let me check" or "Now I'll".
-IF YOU NEED DATA, CALL search_security_events OR list_indices IMMEDIATELY.
-USE search_elastic ONLY WHEN YOU NEED RAW ELASTICSEARCH JSON DSL THAT search_security_events CANNOT EXPRESS.
 DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
-ALWAYS use Markdown tables for tabular data.`
+ALWAYS use Markdown tables for tabular data.
+
+TOOL SELECTION GUIDE — call the right tool immediately:
+- search_security_alerts: detection alerts from Elastic Security rules
+- search_processes: endpoint process events (automatically searches logs-endpoint.events.process-*)
+- search_security_events: network and endpoint events — use index logs-zeek.*-* for Zeek, logs-suricata.*-* for Suricata, packetbeat-* for Packetbeat, logs-endpoint.events.network-* or logs-endpoint.events.file-* for endpoint
+- list_indices: discover available indices before searching if unsure
+- list_detection_rules / get_detection_rule: inspect or browse detection rules
+- list_agents: check Elastic Agent / Fleet status
+- lookup_domain / lookup_ip: fast DNS history lookup from cache
+- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
+- kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
 const maxLoggedPayloadChars = 4000
 const maxHistoryMessages = 15
@@ -942,7 +951,7 @@ func runSinglePrompt(modelFlag string, prompt string) {
 			Function: &llms.FunctionDefinition{
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  t.InputSchema,
+				Parameters:  normalizeToolSchema(t.InputSchema),
 			},
 		})
 	}
@@ -1159,7 +1168,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 		case "Gemini":
 			modelItems = []list.Item{
 				item{title: "gemini-3.1-pro-preview", desc: "Preferred Gemini Pro model"},
-				item{title: "gemini-3-flash-preview", desc: "Fast Gemini Flash model"},
+				item{title: "gemini-3.5-flash", desc: "Fast Gemini Flash model"},
 				item{title: "Custom...", desc: ""},
 			}
 		}
@@ -1245,7 +1254,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 			Function: &llms.FunctionDefinition{
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  t.InputSchema,
+				Parameters:  normalizeToolSchema(t.InputSchema),
 			},
 		})
 	}
@@ -1304,4 +1313,19 @@ func saveHistory(input string) {
 	if _, err := f.WriteString(input + "\n"); err != nil {
 		slog.Warn("failed to write to history file", "file", histFile, "error", err)
 	}
+}
+
+// normalizeToolSchema ensures "type":"object" schemas always include a "properties" key.
+// Gemini rejects tool schemas that have additionalProperties:false but no properties map.
+func normalizeToolSchema(schema any) any {
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return schema
+	}
+	if t, _ := m["type"].(string); t == "object" {
+		if _, hasProps := m["properties"]; !hasProps {
+			m["properties"] = map[string]any{}
+		}
+	}
+	return m
 }

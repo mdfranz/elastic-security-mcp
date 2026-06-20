@@ -64,15 +64,9 @@ var summaryFallbackPaths = []string{
 	"event.original",
 }
 
-const defaultSearchTimeout = 30 * time.Second
-
+// ensureSearchTimeout applies the shared configurable tool timeout (TOOL_TIMEOUT_SECS).
 func ensureSearchTimeout(ctx context.Context) context.Context {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultSearchTimeout)
-		_ = cancel
-	}
-	return ctx
+	return ensureToolTimeout(ctx)
 }
 
 var sourceIncludes = []string{
@@ -97,7 +91,7 @@ var sourceIncludes = []string{
 }
 
 type SearchSecurityEventsArgs struct {
-	Index   string `json:"index" jsonschema:"The index pattern to search, such as logs-* or packetbeat-*"`
+	Index   string `json:"index" jsonschema:"The index pattern to search. Network logs: logs-zeek.*-* (Zeek DNS/conn/HTTP/SSL), logs-suricata.*-* (Suricata EVE alerts and flows), packetbeat-* (Packetbeat). Endpoint events: logs-endpoint.events.network-* (endpoint network), logs-endpoint.events.file-* (endpoint file), logs-endpoint.events.*  (all endpoint events). Use logs-* to search all integration logs."`
 	Text    string `json:"text,omitempty" jsonschema:"Optional free-text query across network-heavy security fields"`
 	Start   string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
 	End     string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
@@ -109,6 +103,7 @@ type SearchSecurityEventsArgs struct {
 	URL     string `json:"url,omitempty" jsonschema:"Optional exact full URL filter"`
 	Dataset string `json:"dataset,omitempty" jsonschema:"Optional exact event dataset filter, such as zeek.dns or suricata.eve"`
 	Size    int    `json:"size,omitempty" jsonschema:"Optional result count, default 10, maximum 20"`
+	From    int    `json:"from,omitempty" jsonschema:"Optional pagination offset (0-based). Use with size to page through results."`
 }
 
 func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache) {
@@ -128,7 +123,7 @@ func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_security_events",
-		Description: "Search ECS-style Zeek and Suricata data with typed filters, tuned boosts, filter-context constraints, and snippets-first highlighting.",
+		Description: "Search ECS-style security event data with typed filters, tuned boosts, filter-context constraints, and snippets-first highlighting. Supports network logs (Zeek via logs-zeek.*-*, Suricata via logs-suricata.*-*, Packetbeat via packetbeat-*) and endpoint events (logs-endpoint.events.network-*, logs-endpoint.events.file-*, logs-endpoint.events.*). Use search_processes for endpoint process events.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityEventsArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_security_events", &err)
 		normalized, err := normalizeSecuritySearchArgs(args)
@@ -146,14 +141,18 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 
 	ctx = ensureSearchTimeout(ctx)
 	req := buildSecuritySearchRequest(args)
-	slog.Info("search_security_events called", "index", args.Index, "size", args.Size, "text", args.Text, "start", args.Start, "end", args.End, "ip", args.IP, "src_ip", args.SrcIP, "dst_ip", args.DstIP, "mac", args.MAC, "domain", args.Domain, "url", args.URL, "dataset", args.Dataset)
+	slog.Info("search_security_events called", "index", args.Index, "size", args.Size, "from", args.From, "text", args.Text, "start", args.Start, "end", args.End, "ip", args.IP, "src_ip", args.SrcIP, "dst_ip", args.DstIP, "mac", args.MAC, "domain", args.Domain, "url", args.URL, "dataset", args.Dataset)
+	if queryJSON, err := json.Marshal(req); err == nil {
+		slog.Debug("search_security_events query", "index", args.Index, "query", string(queryJSON))
+	}
 
+	start := time.Now()
 	resp, err := es.Typed.Search().
 		Index(args.Index).
 		Request(req).
 		Do(ctx)
 	if err != nil {
-		slog.Error("search_security_events error", "index", args.Index, "error", err)
+		slog.Error("search_security_events error", "index", args.Index, "latency_ms", time.Since(start).Milliseconds(), "error", err)
 		errMsg := fmt.Sprintf("search_security_events error: %v", err)
 		if strings.Contains(err.Error(), "all shards failed") {
 			errMsg += " (all shards failed — index may be unhealthy or missing fields; try with a specific index name or use list_indices to verify)"
@@ -165,12 +164,12 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 		cache.IndexTypedSearchResult(ctx, resp)
 	}
 
-	output, err := shapeSecuritySearchResponse(resp)
+	output, err := shapeSecuritySearchResponse(resp, args)
 	if err != nil {
 		return nil, err
 	}
 
-	slog.Info("search_security_events result", "took", resp.Took, "hits", totalHitsValue(resp.Hits.Total))
+	slog.Info("search_security_events result", "took_ms", resp.Took, "latency_ms", time.Since(start).Milliseconds(), "hits", totalHitsValue(resp.Hits.Total))
 	return output, nil
 }
 
@@ -221,6 +220,9 @@ func securityFilterCount(args SearchSecurityEventsArgs) int {
 func buildSecuritySearchRequest(args SearchSecurityEventsArgs) *typedsearch.Request {
 	req := typedsearch.NewRequest()
 	req.Size = &args.Size
+	if args.From > 0 {
+		req.From = &args.From
+	}
 	req.TrackTotalHits = true
 	req.Source_ = &types.SourceFilter{Includes: append([]string(nil), sourceIncludes...)}
 	req.Highlight = buildSecurityHighlight()
@@ -416,7 +418,7 @@ func buildSecurityHighlight() *types.Highlight {
 	}
 }
 
-func shapeSecuritySearchResponse(resp *typedsearch.Response) (map[string]interface{}, error) {
+func shapeSecuritySearchResponse(resp *typedsearch.Response, args SearchSecurityEventsArgs) (map[string]interface{}, error) {
 	hits := make([]interface{}, 0, len(resp.Hits.Hits))
 	for _, hit := range resp.Hits.Hits {
 		shaped, err := shapeSecurityHit(hit)
@@ -426,11 +428,23 @@ func shapeSecuritySearchResponse(resp *typedsearch.Response) (map[string]interfa
 		hits = append(hits, shaped)
 	}
 
+	total := formatTotalHits(resp.Hits.Total)
 	out := map[string]interface{}{
 		"took":  resp.Took,
-		"total": formatTotalHits(resp.Hits.Total),
+		"total": total,
 		"hits":  hits,
 	}
+
+	totalVal, _ := total["value"].(int64)
+	if args.From > 0 || int64(len(hits)) < totalVal {
+		out["pagination"] = map[string]interface{}{
+			"from":     args.From,
+			"size":     args.Size,
+			"returned": len(hits),
+			"total":    totalVal,
+		}
+	}
+
 	truncateSecuritySearchResults(out)
 	return out, nil
 }
