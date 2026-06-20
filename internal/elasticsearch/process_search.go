@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	typedsearch "github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
@@ -26,6 +27,7 @@ type SearchProcessesArgs struct {
 	Start       string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
 	End         string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
 	Size        int    `json:"size,omitempty" jsonschema:"Optional result count, default 20, maximum 100"`
+	From        int    `json:"from,omitempty" jsonschema:"Optional pagination offset (0-based). Use with size to page through results."`
 }
 
 func RegisterProcessSearchTool(server *mcp.Server, es *Client, cache *ToolCache) {
@@ -67,6 +69,7 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 		"start", args.Start,
 		"end", args.End,
 		"size", args.Size,
+		"from", args.From,
 	)
 
 	// Build query
@@ -172,6 +175,9 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 	// Build the request using builder pattern
 	req := typedsearch.NewRequest()
 	req.Size = &size
+	if args.From > 0 {
+		req.From = &args.From
+	}
 	req.TrackTotalHits = true
 	req.Source_ = &types.SourceFilter{
 		Includes: []string{
@@ -218,13 +224,18 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 		Bool: boolQuery,
 	}
 
+	if queryJSON, err := json.Marshal(req); err == nil {
+		slog.Debug("search_processes query", "index", "logs-endpoint.events.process-*", "query", string(queryJSON))
+	}
+
+	start := time.Now()
 	// Execute search on process events index
 	resp, err := es.Typed.Search().
 		Index("logs-endpoint.events.process-*").
 		Request(req).
 		Do(ctx)
 	if err != nil {
-		slog.Error("search_processes error", "error", err)
+		slog.Error("search_processes error", "latency_ms", time.Since(start).Milliseconds(), "error", err)
 		errMsg := fmt.Sprintf("search_processes error: %v", err)
 		if strings.Contains(err.Error(), "all shards failed") {
 			errMsg += " (no matching process event indices found; ensure Elastic Agent is collecting endpoint process data)"
@@ -237,15 +248,25 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 	}
 
 	// Shape response
+	data := shapeProcessResults(resp.Hits.Hits)
+	total := totalHitsValue(resp.Hits.Total)
 	output := map[string]interface{}{
 		"took": resp.Took,
 		"hits": map[string]interface{}{
-			"total": totalHitsValue(resp.Hits.Total),
-			"data":  shapeProcessResults(resp.Hits.Hits),
+			"total": total,
+			"data":  data,
 		},
 	}
+	if args.From > 0 || int64(len(data)) < total {
+		output["pagination"] = map[string]interface{}{
+			"from":     args.From,
+			"size":     size,
+			"returned": len(data),
+			"total":    total,
+		}
+	}
 
-	slog.Info("search_processes result", "took", resp.Took, "hits", totalHitsValue(resp.Hits.Total))
+	slog.Info("search_processes result", "took_ms", resp.Took, "latency_ms", time.Since(start).Milliseconds(), "hits", totalHitsValue(resp.Hits.Total))
 	return output, nil
 }
 

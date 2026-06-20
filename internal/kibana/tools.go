@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -53,12 +55,19 @@ func RegisterTools(server *mcp.Server, client *Client) {
 			path = "/" + path
 		}
 
+		if args.Body != nil {
+			if bodyJSON, err := json.Marshal(args.Body); err == nil {
+				slog.Debug("kibana_api_request body", "method", method, "path", path, "body", string(bodyJSON))
+			}
+		}
 		slog.Info("kibana_api_request called", "method", method, "path", path)
+		start := time.Now()
 		respBody, statusCode, err := client.DoRequest(ctx, method, path, args.Body)
 		if err != nil {
-			slog.Error("kibana_api_request error", "error", err)
+			slog.Error("kibana_api_request error", "method", method, "path", path, "latency_ms", time.Since(start).Milliseconds(), "error", err)
 			return nil, nil, fmt.Errorf("kibana_api_request error: %w", err)
 		}
+		slog.Info("kibana_api_request response", "method", method, "path", path, "status_code", statusCode, "latency_ms", time.Since(start).Milliseconds(), "response_bytes", len(respBody))
 
 		return formatResponse(respBody, statusCode)
 	})
@@ -69,11 +78,13 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Description: "List all available Kibana spaces.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListKibanaSpacesArgs) (res *mcp.CallToolResult, extra any, err error) {
 		slog.Info("list_kibana_spaces called")
+		start := time.Now()
 		respBody, statusCode, err := client.DoRequest(ctx, "GET", "/api/spaces/space", nil)
 		if err != nil {
-			slog.Error("list_kibana_spaces error", "error", err)
+			slog.Error("list_kibana_spaces error", "latency_ms", time.Since(start).Milliseconds(), "error", err)
 			return nil, nil, fmt.Errorf("list_kibana_spaces error: %w", err)
 		}
+		slog.Info("list_kibana_spaces response", "status_code", statusCode, "latency_ms", time.Since(start).Milliseconds(), "response_bytes", len(respBody))
 
 		return formatResponse(respBody, statusCode)
 	})
@@ -83,8 +94,6 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "list_detection_rules",
 		Description: "Retrieve a list of detection engine rules from the Elastic Security app, including their enabled status.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListDetectionRulesArgs) (res *mcp.CallToolResult, extra any, err error) {
-		slog.Info("list_detection_rules called", "page", args.Page, "per_page", args.PerPage)
-
 		path := "/api/detection_engine/rules/_find"
 		var params []string
 		if args.Page > 0 {
@@ -97,13 +106,14 @@ func RegisterTools(server *mcp.Server, client *Client) {
 			path += "?" + strings.Join(params, "&")
 		}
 
-		slog.Info("list_detection_rules making request", "path", path)
+		slog.Info("list_detection_rules called", "page", args.Page, "per_page", args.PerPage, "path", path)
+		start := time.Now()
 		respBody, statusCode, err := client.DoRequest(ctx, "GET", path, nil)
-		slog.Info("list_detection_rules response", "statusCode", statusCode, "errorPresent", err != nil)
 		if err != nil {
-			slog.Error("list_detection_rules error", "error", err)
+			slog.Error("list_detection_rules error", "path", path, "latency_ms", time.Since(start).Milliseconds(), "error", err)
 			return nil, nil, fmt.Errorf("list_detection_rules error: %w", err)
 		}
+		slog.Info("list_detection_rules response", "path", path, "status_code", statusCode, "latency_ms", time.Since(start).Milliseconds(), "response_bytes", len(respBody))
 
 		return formatResponse(respBody, statusCode)
 	})
@@ -113,8 +123,6 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "get_detection_rule",
 		Description: "Get details of a specific Elastic Security detection engine rule by its ID (internal saved object ID) or rule_id (user-defined unique ID). Provide at least one.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args GetDetectionRuleArgs) (res *mcp.CallToolResult, extra any, err error) {
-		slog.Info("get_detection_rule called", "id", args.Id, "rule_id", args.RuleId)
-		
 		if args.Id == "" && args.RuleId == "" {
 			return nil, nil, fmt.Errorf("either id or rule_id must be provided")
 		}
@@ -126,11 +134,14 @@ func RegisterTools(server *mcp.Server, client *Client) {
 			path += "?rule_id=" + args.RuleId
 		}
 
+		slog.Info("get_detection_rule called", "id", args.Id, "rule_id", args.RuleId, "path", path)
+		start := time.Now()
 		respBody, statusCode, err := client.DoRequest(ctx, "GET", path, nil)
 		if err != nil {
-			slog.Error("get_detection_rule error", "error", err)
+			slog.Error("get_detection_rule error", "path", path, "latency_ms", time.Since(start).Milliseconds(), "error", err)
 			return nil, nil, fmt.Errorf("get_detection_rule error: %w", err)
 		}
+		slog.Info("get_detection_rule response", "path", path, "status_code", statusCode, "latency_ms", time.Since(start).Milliseconds(), "response_bytes", len(respBody))
 
 		return formatResponse(respBody, statusCode)
 	})
@@ -140,8 +151,6 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "list_agents",
 		Description: "Retrieve Elastic Agents from Fleet using the Kibana Fleet API.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListAgentsArgs) (res *mcp.CallToolResult, extra any, err error) {
-		slog.Info("list_agents called", "page", args.Page, "perPage", args.PerPage, "kuery", args.Kuery)
-		
 		path := "/api/fleet/agents"
 		var params []string
 		if args.Page > 0 {
@@ -151,17 +160,20 @@ func RegisterTools(server *mcp.Server, client *Client) {
 			params = append(params, fmt.Sprintf("perPage=%d", args.PerPage))
 		}
 		if args.Kuery != "" {
-			params = append(params, fmt.Sprintf("kuery=%s", args.Kuery))
+			params = append(params, "kuery="+url.QueryEscape(args.Kuery))
 		}
 		if len(params) > 0 {
 			path += "?" + strings.Join(params, "&")
 		}
 
+		slog.Info("list_agents called", "page", args.Page, "perPage", args.PerPage, "kuery", args.Kuery, "path", path)
+		start := time.Now()
 		respBody, statusCode, err := client.DoRequest(ctx, "GET", path, nil)
 		if err != nil {
-			slog.Error("list_agents error", "error", err)
+			slog.Error("list_agents error", "path", path, "latency_ms", time.Since(start).Milliseconds(), "error", err)
 			return nil, nil, fmt.Errorf("list_agents error: %w", err)
 		}
+		slog.Info("list_agents response", "path", path, "status_code", statusCode, "latency_ms", time.Since(start).Milliseconds(), "response_bytes", len(respBody))
 
 		return formatResponse(respBody, statusCode)
 	})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	typedsearch "github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
@@ -78,12 +79,13 @@ func runSecurityAlertsSearch(ctx context.Context, es *Client, args SearchSecurit
 
 	slog.Info("search_security_alerts called", "query", args.Query, "severity", args.Severity, "rule_name", args.RuleName, "host", args.Host)
 
+	start := time.Now()
 	resp, err := es.Typed.Search().
 		Index(indexPattern).
 		Request(req).
 		Do(ctx)
 	if err != nil {
-		slog.Error("search_security_alerts error", "error", err)
+		slog.Error("search_security_alerts error", "latency_ms", time.Since(start).Milliseconds(), "error", err)
 		return nil, fmt.Errorf("search_security_alerts error: %w", err)
 	}
 
@@ -92,7 +94,7 @@ func runSecurityAlertsSearch(ctx context.Context, es *Client, args SearchSecurit
 		return nil, err
 	}
 
-	slog.Info("search_security_alerts result", "took", resp.Took, "hits", totalHitsValue(resp.Hits.Total))
+	slog.Info("search_security_alerts result", "took_ms", resp.Took, "latency_ms", time.Since(start).Milliseconds(), "hits", totalHitsValue(resp.Hits.Total))
 	return output, nil
 }
 

@@ -4,6 +4,7 @@
       "command": "/home/mdfranz/github/elastic-security-mcp/elastic-mcp-server",
       "args": [],
       "env": {
+        "SERVER_LOG_LEVEL": "debug",
         "ELASTIC_URL": "${ELASTIC_URL}",
         "ELASTIC_KEY": "${ELASTIC_KEY}",
         "KIBANA_URL":  "${KIBANA_URL}",

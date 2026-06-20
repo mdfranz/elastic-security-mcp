@@ -34,14 +34,19 @@ type LookupIPArgs struct {
 }
 
 var maxResponseChars int
-
-const defaultToolTimeout = 30 * time.Second
+var defaultToolTimeout time.Duration
 
 func init() {
 	maxResponseChars = 20000
 	if v := strings.TrimSpace(os.Getenv("MAX_RESPONSE_CHARS")); v != "" {
 		if chars, err := strconv.Atoi(v); err == nil && chars > 0 {
 			maxResponseChars = chars
+		}
+	}
+	defaultToolTimeout = 30 * time.Second
+	if v := strings.TrimSpace(os.Getenv("TOOL_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			defaultToolTimeout = time.Duration(secs) * time.Second
 		}
 	}
 }
@@ -239,6 +244,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		}
 
 		// Perform the search
+		start := time.Now()
 		searchRes, err := es.Raw.Search(
 			es.Raw.Search.WithContext(ctx),
 			es.Raw.Search.WithIndex(args.Index),
@@ -253,6 +259,38 @@ func RegisterTools(server *mcp.Server, es *Client) {
 			err := HttpError("search", searchRes)
 			slog.Warn("search request failed", "index", args.Index, "error", err)
 			errMsg := fmt.Sprintf("%v", err)
+
+			// Collapse field not mapped: retry without collapse clause
+			if strings.Contains(errMsg, "in order to collapse on") {
+				searchRes.Body.Close()
+				if retryQuery, stripped := withoutCollapse(queryStr); stripped {
+					slog.Info("retrying search_elastic without collapse clause", "index", args.Index)
+					retryRes, retryErr := es.Raw.Search(
+						es.Raw.Search.WithContext(ctx),
+						es.Raw.Search.WithIndex(args.Index),
+						es.Raw.Search.WithBody(strings.NewReader(retryQuery)),
+					)
+					if retryErr == nil && !retryRes.IsError() {
+						defer retryRes.Body.Close()
+						var retryResult map[string]interface{}
+						if decErr := json.NewDecoder(retryRes.Body).Decode(&retryResult); decErr == nil {
+							retryResult["note"] = "collapse deduplication was skipped because the field has no keyword mapping; results may contain duplicates — use a terms aggregation instead"
+							slog.Info("search_elastic collapse retry succeeded", "index", args.Index)
+							cache.IndexSearchResult(ctx, retryResult)
+							truncateResults(retryResult)
+							jsonOutput, _ := json.MarshalIndent(retryResult, "", "  ")
+							return &mcp.CallToolResult{
+								Content: []mcp.Content{&mcp.TextContent{Text: string(jsonOutput)}},
+							}, nil, nil
+						}
+					}
+					if retryRes != nil {
+						retryRes.Body.Close()
+					}
+				}
+				errMsg += " — the field has no .keyword mapping; use a terms aggregation to deduplicate instead"
+			}
+
 			if strings.Contains(errMsg, "all shards failed") {
 				errMsg += " — index may be unhealthy or missing; try list_indices to verify the index exists"
 			}
@@ -272,7 +310,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		total, _ := hits["total"].(map[string]interface{})
 		value := total["value"]
 
-		slog.Info("search_elastic result", "took", took, "hits", value)
+		slog.Info("search_elastic result", "took_ms", took, "latency_ms", time.Since(start).Milliseconds(), "hits", value)
 
 		cache.IndexSearchResult(ctx, result)
 		truncateResults(result)
@@ -349,6 +387,24 @@ func RegisterTools(server *mcp.Server, es *Client) {
 			Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
 		}, nil, nil
 	})
+}
+
+// withoutCollapse removes the top-level "collapse" clause from an Elasticsearch
+// query JSON string. Returns the modified query and true if collapse was present.
+func withoutCollapse(queryStr string) (string, bool) {
+	var q map[string]interface{}
+	if err := json.Unmarshal([]byte(queryStr), &q); err != nil {
+		return queryStr, false
+	}
+	if _, has := q["collapse"]; !has {
+		return queryStr, false
+	}
+	delete(q, "collapse")
+	b, err := json.Marshal(q)
+	if err != nil {
+		return queryStr, false
+	}
+	return string(b), true
 }
 
 func parseJSONStrings(ss []string) []json.RawMessage {
