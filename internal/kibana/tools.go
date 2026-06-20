@@ -81,11 +81,11 @@ func RegisterTools(server *mcp.Server, client *Client) {
 	// 3. Register list_detection_rules
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_detection_rules",
-		Description: "Retrieve a list of detection engine rules from the Elastic Security app.",
+		Description: "Retrieve a list of detection engine rules from the Elastic Security app, including their enabled status.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListDetectionRulesArgs) (res *mcp.CallToolResult, extra any, err error) {
 		slog.Info("list_detection_rules called", "page", args.Page, "per_page", args.PerPage)
-		
-		path := "/api/detection_engine/rules"
+
+		path := "/api/detection_engine/rules/_find"
 		var params []string
 		if args.Page > 0 {
 			params = append(params, fmt.Sprintf("page=%d", args.Page))
@@ -97,7 +97,9 @@ func RegisterTools(server *mcp.Server, client *Client) {
 			path += "?" + strings.Join(params, "&")
 		}
 
+		slog.Info("list_detection_rules making request", "path", path)
 		respBody, statusCode, err := client.DoRequest(ctx, "GET", path, nil)
+		slog.Info("list_detection_rules response", "statusCode", statusCode, "errorPresent", err != nil)
 		if err != nil {
 			slog.Error("list_detection_rules error", "error", err)
 			return nil, nil, fmt.Errorf("list_detection_rules error: %w", err)
