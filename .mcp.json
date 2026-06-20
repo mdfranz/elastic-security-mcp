@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "elastic-security-mcp": {
+      "command": "/home/mdfranz/github/elastic-security-mcp/elastic-mcp-server",
+      "args": [],
+      "env": {
+        "ELASTIC_URL": "${ELASTIC_URL}",
+        "ELASTIC_KEY": "${ELASTIC_KEY}",
+        "KIBANA_URL":  "${KIBANA_URL}",
+        "KIBANA_USER": "mcp",
+        "KIBANA_PASS": "${KIBANA_PASS}"      }
+    }
+  }
+}

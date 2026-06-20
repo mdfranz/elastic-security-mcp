@@ -151,6 +151,7 @@ func normalizeSearchArgs(args SearchArgs) SearchArgs {
 func RegisterTools(server *mcp.Server, es *Client) {
 	cache := NewToolCache()
 	RegisterSecuritySearchTool(server, es, cache)
+	RegisterSecurityAlertsTool(server, es, cache)
 
 	// Register List Indices Tool
 	listHandler := WrapWithCache(cache, "list_indices", ListIndicesTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
