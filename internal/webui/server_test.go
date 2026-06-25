@@ -10,14 +10,14 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/tmc/langchaingo/llms"
+	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
 func setupTestServer() *Server {
 	return &Server{
 		mcpSession: nil,
 		llmClient:  nil,
-		lcTools:    []llms.Tool{},
+		anyTools:   []anyllm.Tool{},
 		modelName:  "test-model",
 		useMemory:  false,
 	}
@@ -173,20 +173,20 @@ func TestToolEventSerialization(t *testing.T) {
 func TestSummarizeToolCalls(t *testing.T) {
 	tests := []struct {
 		name      string
-		toolCalls []llms.ToolCall
+		toolCalls []anyllm.ToolCall
 		wantLen   int
 		wantWords []string
 	}{
 		{
 			name:      "Empty tool calls",
-			toolCalls: []llms.ToolCall{},
+			toolCalls: []anyllm.ToolCall{},
 			wantWords: []string{"Waiting"},
 		},
 		{
 			name: "Single tool call",
-			toolCalls: []llms.ToolCall{
+			toolCalls: []anyllm.ToolCall{
 				{
-					FunctionCall: &llms.FunctionCall{
+					Function: anyllm.FunctionCall{
 						Name: "search",
 					},
 				},
@@ -251,11 +251,11 @@ func TestConversationHistoryInitialization(t *testing.T) {
 		t.Errorf("Expected 1 message in history, got %d", len(history))
 	}
 
-	if history[0].Role != llms.ChatMessageTypeSystem {
+	if history[0].Role != anyllm.RoleSystem {
 		t.Errorf("Expected system role, got %v", history[0].Role)
 	}
 
-	if len(history[0].Parts) == 0 {
+	if history[0].ContentString() == "" {
 		t.Error("Expected system prompt content")
 	}
 }

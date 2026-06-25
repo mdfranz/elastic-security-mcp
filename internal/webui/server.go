@@ -2,9 +2,7 @@ package webui
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -13,10 +11,10 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/mfranz/elastic-security-mcp/internal/llm"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/memory"
+	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
 //go:embed assets/*
@@ -59,17 +57,17 @@ type ToolEvent struct {
 
 type Server struct {
 	mcpSession *mcp.ClientSession
-	llmClient  llms.Model
-	lcTools    []llms.Tool
+	llmClient  anyllm.Provider
+	anyTools   []anyllm.Tool
 	modelName  string
 	useMemory  bool
 }
 
-func RunServer(ctx context.Context, session *mcp.ClientSession, client llms.Model, tools []llms.Tool, modelName string, port int, useMemory bool) error {
+func RunServer(ctx context.Context, session *mcp.ClientSession, client anyllm.Provider, tools []anyllm.Tool, modelName string, port int, useMemory bool) error {
 	s := &Server{
 		mcpSession: session,
 		llmClient:  client,
-		lcTools:    tools,
+		anyTools:   tools,
 		modelName:  modelName,
 		useMemory:  useMemory,
 	}
@@ -104,7 +102,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.sendMessage(conn, WebMessage{Type: "setup", Model: s.modelName})
 
 	history := newConversationHistory()
-	connMem := memory.NewConversationBuffer()
+	connMem := llm.NewConversationBuffer()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -121,7 +119,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		if req.Type == "reset" {
 			history = newConversationHistory()
-			connMem = memory.NewConversationBuffer()
+			connMem = llm.NewConversationBuffer()
 			s.sendMessage(conn, WebMessage{Type: "system", Content: "New session started. Previous context cleared."})
 			s.sendMessage(conn, WebMessage{Type: "clear_status"})
 			continue
@@ -151,9 +149,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 			s.sendMessage(conn, WebMessage{Type: "user", Content: userInput})
 
-			history = append(history, llms.MessageContent{
-				Role:  llms.ChatMessageTypeHuman,
-				Parts: []llms.ContentPart{llms.TextContent{Text: userInput}},
+			history = append(history, anyllm.Message{
+				Role:    anyllm.RoleUser,
+				Content: userInput,
 			})
 
 			// Conversation loop
@@ -162,18 +160,25 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]llms.MessageContent, connMem *memory.ConversationBuffer, lastUserInput string) {
+func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]anyllm.Message, connMem *llm.ConversationBuffer, lastUserInput string) {
 	for {
 		s.sendMessage(conn, WebMessage{Type: "status", Content: "Analyzing request...", Thinking: true})
 		slog.Info("LLM request", "history_len", len(*history), "model", s.modelName)
-		resp, err := util.WithRetry(ctx, func() (*llms.ContentResponse, error) {
-			return s.llmClient.GenerateContent(ctx, *history,
-				llms.WithTools(s.lcTools),
-				llms.WithMaxTokens(4096),
-				llms.WithTemperature(0),
-			)
-		})
+		
+		var (
+			tempZero      = 0.0
+			maxTokens4096 = 4096
+		)
 
+		resp, err := util.WithRetry(ctx, func() (*anyllm.ChatCompletion, error) {
+			return s.llmClient.Completion(ctx, anyllm.CompletionParams{
+				Model:       s.modelName,
+				Messages:    *history,
+				Tools:       s.anyTools,
+				Temperature: &tempZero,
+				MaxTokens:   &maxTokens4096,
+			})
+		})
 
 		if err != nil {
 			s.sendMessage(conn, WebMessage{Type: "error", Content: fmt.Sprintf("LLM error: %v", err)})
@@ -188,64 +193,40 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 		}
 
 		choice := resp.Choices[0]
-		assistantParts := []llms.ContentPart{}
-		if choice.Content != "" {
-			assistantParts = append(assistantParts, llms.TextContent{Text: choice.Content})
-		}
-
-		for i := range choice.ToolCalls {
-			if choice.ToolCalls[i].ID == "" {
-				b := make([]byte, 8)
-				if _, err := rand.Read(b); err != nil {
-					slog.Error("Failed to generate tool call ID", "error", err)
-					s.sendMessage(conn, WebMessage{Type: "error", Content: "Failed to generate tool call ID"})
-					return
-				}
-				choice.ToolCalls[i].ID = hex.EncodeToString(b)
-			}
-			if choice.ToolCalls[i].Type == "" {
-				choice.ToolCalls[i].Type = "tool_call"
-			}
-			assistantParts = append(assistantParts, choice.ToolCalls[i])
-		}
-
-		*history = append(*history, llms.MessageContent{
-			Role:  llms.ChatMessageTypeAI,
-			Parts: assistantParts,
-		})
+		*history = append(*history, choice.Message)
 
 		// Detect stalling (copy logic from main.go)
-		content := strings.ToLower(choice.Content)
-		if len(choice.ToolCalls) == 0 && (strings.Contains(content, "i will") ||
+		content := strings.ToLower(choice.Message.ContentString())
+		if len(choice.Message.ToolCalls) == 0 && (strings.Contains(content, "i will") ||
 			strings.Contains(content, "let me") ||
 			strings.Contains(content, "now i'll") ||
 			strings.Contains(content, "searching")) {
 
-			*history = append(*history, llms.MessageContent{
-				Role:  llms.ChatMessageTypeHuman,
-				Parts: []llms.ContentPart{llms.TextContent{Text: "Please proceed with the tool call immediately. Do not narrate your intent."}},
+			*history = append(*history, anyllm.Message{
+				Role:    anyllm.RoleUser,
+				Content: "Please proceed with the tool call immediately. Do not narrate your intent.",
 			})
 			continue
 		}
 
-		if choice.Content != "" && len(choice.ToolCalls) == 0 {
-			s.sendMessage(conn, WebMessage{Type: "assistant", Content: choice.Content})
+		if choice.Message.ContentString() != "" && len(choice.Message.ToolCalls) == 0 {
+			s.sendMessage(conn, WebMessage{Type: "assistant", Content: choice.Message.ContentString()})
 
 			if s.useMemory && lastUserInput != "" {
 				_ = connMem.SaveContext(ctx,
 					map[string]any{"input": lastUserInput},
-					map[string]any{"output": choice.Content},
+					map[string]any{"output": choice.Message.ContentString()},
 				)
 			}
 		}
 
-		if len(choice.ToolCalls) > 0 {
-			s.sendMessage(conn, WebMessage{Type: "status", Content: summarizeToolCalls(choice.ToolCalls), Thinking: true})
+		if len(choice.Message.ToolCalls) > 0 {
+			s.sendMessage(conn, WebMessage{Type: "status", Content: summarizeToolCalls(choice.Message.ToolCalls), Thinking: true})
 
-			toolResults := []llms.ContentPart{}
-			for i, tc := range choice.ToolCalls {
-				name := tc.FunctionCall.Name
-				argsJSON := tc.FunctionCall.Arguments
+			toolResults := []anyllm.Message{}
+			for i, tc := range choice.Message.ToolCalls {
+				name := tc.Function.Name
+				argsJSON := tc.Function.Arguments
 
 				var args map[string]any
 				if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
@@ -303,7 +284,8 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 					},
 				})
 
-				toolResults = append(toolResults, llms.ToolCallResponse{
+				toolResults = append(toolResults, anyllm.Message{
+					Role:       anyllm.RoleTool,
 					ToolCallID: tc.ID,
 					Name:       name,
 					Content:    resultText,
@@ -311,10 +293,7 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 			}
 
 			for _, res := range toolResults {
-				*history = append(*history, llms.MessageContent{
-					Role:  llms.ChatMessageTypeTool,
-					Parts: []llms.ContentPart{res},
-				})
+				*history = append(*history, res)
 			}
 			s.sendMessage(conn, WebMessage{Type: "status", Content: "Tool results received. Drafting final answer...", Thinking: true})
 			continue // Loop to let LLM process tool results
@@ -325,11 +304,11 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 	}
 }
 
-func newConversationHistory() []llms.MessageContent {
-	return []llms.MessageContent{
+func newConversationHistory() []anyllm.Message {
+	return []anyllm.Message{
 		{
-			Role:  llms.ChatMessageTypeSystem,
-			Parts: []llms.ContentPart{llms.TextContent{Text: systemPrompt}},
+			Role:    anyllm.RoleSystem,
+			Content: systemPrompt,
 		},
 	}
 }
@@ -355,14 +334,14 @@ USE search_elastic ONLY WHEN YOU NEED RAW ELASTICSEARCH JSON DSL THAT search_sec
 DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
 ALWAYS use Markdown tables for tabular data.`
 
-func summarizeToolCalls(toolCalls []llms.ToolCall) string {
+func summarizeToolCalls(toolCalls []anyllm.ToolCall) string {
 	if len(toolCalls) == 0 {
 		return "Waiting for assistant response..."
 	}
 	names := make([]string, 0, len(toolCalls))
 	for _, tc := range toolCalls {
-		if tc.FunctionCall != nil {
-			names = append(names, tc.FunctionCall.Name)
+		if tc.Function.Name != "" {
+			names = append(names, tc.Function.Name)
 		}
 	}
 	if len(names) == 0 {
