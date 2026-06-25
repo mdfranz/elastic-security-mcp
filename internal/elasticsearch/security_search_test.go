@@ -120,7 +120,7 @@ func TestShapeSecuritySearchResponsePrefersHighlights(t *testing.T) {
 		},
 	}
 
-	out, err := shapeSecuritySearchResponse(resp)
+	out, err := shapeSecuritySearchResponse(resp, SearchSecurityEventsArgs{})
 	if err != nil {
 		t.Fatalf("shapeSecuritySearchResponse error: %v", err)
 	}

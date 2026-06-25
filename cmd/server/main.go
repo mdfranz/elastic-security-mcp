@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/mfranz/elastic-security-mcp/internal/elasticsearch"
+	"github.com/mfranz/elastic-security-mcp/internal/kibana"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -74,6 +75,11 @@ func main() {
 	elasticURL := os.Getenv("ELASTIC_URL")
 	elasticKey := os.Getenv("ELASTIC_KEY")
 
+	kibanaURL := os.Getenv("KIBANA_URL")
+	kibanaUser := os.Getenv("KIBANA_USER")
+	kibanaPass := os.Getenv("KIBANA_PASS")
+	kibanaKey := os.Getenv("KIBANA_KEY")
+
 	if elasticURL == "" || elasticKey == "" {
 		slog.Error("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
 		os.Exit(1)
@@ -108,6 +114,18 @@ func main() {
 
 	// 4. Register Tools
 	elasticsearch.RegisterTools(server, es)
+
+	if kibanaURL != "" {
+		kb, err := kibana.NewClient(kibanaURL, kibanaUser, kibanaPass, kibanaKey)
+		if err != nil {
+			slog.Error("Error creating the kibana client", "error", err)
+			os.Exit(1)
+		}
+		kibana.RegisterTools(server, kb)
+		slog.Info("Kibana tools registered", "url", kibanaURL)
+	} else {
+		slog.Info("KIBANA_URL not set; skipping Kibana tools registration")
+	}
 
 	// 5. Run Server over Stdio
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

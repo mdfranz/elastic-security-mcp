@@ -36,11 +36,20 @@ const systemPrompt = `You are a silent Elastic Security analyst tool.
 YOUR ONLY JOB IS TO CALL TOOLS.
 NEVER explain what you are doing.
 NEVER say "I will search" or "Let me check" or "Now I'll".
-IF YOU NEED DATA, CALL search_security_events, lookup_domain, lookup_ip, OR list_indices IMMEDIATELY.
-USE lookup_domain FOR DOMAIN DNS/IP ACTIVITY, AND lookup_ip FOR IP DNS ACTIVITY.
-USE search_elastic ONLY WHEN YOU NEED RAW ELASTICSEARCH JSON DSL THAT search_security_events CANNOT EXPRESS.
+IF YOU NEED DATA, CALL THE APPROPRIATE SEARCH OR LOOKUP TOOL IMMEDIATELY.
 DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
-ALWAYS use Markdown tables for tabular data.`
+ALWAYS use Markdown tables for tabular data.
+
+TOOL SELECTION GUIDE — call the right tool immediately:
+- search_security_alerts: detection alerts from Elastic Security rules
+- search_processes: endpoint process events (automatically searches logs-endpoint.events.process-*)
+- search_security_events: network and endpoint events — use index logs-zeek.*-* for Zeek, logs-suricata.*-* for Suricata, packetbeat-* for Packetbeat, logs-endpoint.events.network-* or logs-endpoint.events.file-* for endpoint
+- list_indices: discover available indices before searching if unsure
+- list_detection_rules / get_detection_rule: inspect or browse detection rules
+- list_agents: check Elastic Agent / Fleet status
+- lookup_domain / lookup_ip: fast DNS history lookup from cache
+- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
+- kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
 const maxLoggedPayloadChars = 4000
 const maxHistoryMessages = 15
@@ -1454,7 +1463,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, anyllm
 		case "Gemini":
 			modelItems = []list.Item{
 				item{title: "gemini-3.1-pro-preview", desc: "Preferred Gemini Pro model"},
-				item{title: "gemini-3-flash-preview", desc: "Fast Gemini Flash model"},
+				item{title: "gemini-3.5-flash", desc: "Fast Gemini Flash model"},
 				item{title: "Custom...", desc: ""},
 			}
 		}
@@ -1601,16 +1610,25 @@ func convertSchema(schema any) map[string]any {
 	if schema == nil {
 		return nil
 	}
-	if m, ok := schema.(map[string]any); ok {
-		return m
-	}
-	b, err := json.Marshal(schema)
-	if err != nil {
-		return nil
-	}
 	var res map[string]any
-	if err := json.Unmarshal(b, &res); err != nil {
-		return nil
+	if m, ok := schema.(map[string]any); ok {
+		res = make(map[string]any, len(m))
+		for k, v := range m {
+			res[k] = v
+		}
+	} else {
+		b, err := json.Marshal(schema)
+		if err != nil {
+			return nil
+		}
+		if err := json.Unmarshal(b, &res); err != nil {
+			return nil
+		}
+	}
+	if t, _ := res["type"].(string); t == "object" {
+		if _, hasProps := res["properties"]; !hasProps {
+			res["properties"] = map[string]any{}
+		}
 	}
 	return res
 }
