@@ -2,7 +2,7 @@
 
 This document details the architectural, implementation, and dependency differences between using **`github.com/tmc/langchaingo`** and **`github.com/mozilla-ai/any-llm-go`** (`any-llm-go`) for orchestrating LLM requests, conversation history, memory management, and tool calling within `elastic-security-mcp`. 
 
-The codebase was migrated to `any-llm-go` in commit [a59d51e](file:///home/mdfranz/github/elastic-security-mcp) to simplify dependency charts, natively support Gemini features (including thought signatures), and streamline custom integrations.
+The codebase was migrated to `any-llm-go` in commit `a59d51e` to simplify dependency charts, natively support Gemini features (including thought signatures), and streamline custom integrations.
 
 ---
 
@@ -54,7 +54,7 @@ One of the largest pain points in the previous `langchaingo` setup was support f
 The CLI requires conversational memory to retain previous user prompts, tool results, and assistant responses.
 
 *   **Before (`langchaingo`)**: The project imported `github.com/tmc/langchaingo/memory` and used its built-in `memory.ConversationBuffer` to store history.
-*   **After (`any-llm-go`)**: To avoid importing the massive `langchaingo` framework just for its memory module, a lightweight replacement was implemented in [internal/llm/memory.go](file:///home/mdfranz/github/elastic-security-mcp/internal/llm/memory.go). This custom `ConversationBuffer` retains the exact same signature methods to prevent breaking consumers in [cmd/cli/main.go](file:///home/mdfranz/github/elastic-security-mcp/cmd/cli/main.go) and [internal/webui/server.go](file:///home/mdfranz/github/elastic-security-mcp/internal/webui/server.go):
+*   **After (`any-llm-go`)**: To avoid importing the massive `langchaingo` framework just for its memory module, a lightweight replacement was implemented in [internal/llm/memory.go](./internal/llm/memory.go). This custom `ConversationBuffer` retains the exact same signature methods to prevent breaking consumers in [cmd/cli/main.go](./cmd/cli/main.go) and [internal/webui/server.go](./internal/webui/server.go):
     ```go
     type ConversationBuffer struct {
         mu       sync.Mutex
