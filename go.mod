@@ -3,6 +3,7 @@ module github.com/mfranz/elastic-security-mcp
 go 1.26.2
 
 require (
+	github.com/amit-timalsina/pi-llm-go v0.0.0-00010101000000-000000000000
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
@@ -10,40 +11,8 @@ require (
 	github.com/elastic/go-elasticsearch/v9 v9.3.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/modelcontextprotocol/go-sdk v1.6.0
-	github.com/mozilla-ai/any-llm-go v0.0.0
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/spf13/cobra v1.10.2
-)
-
-require (
-	cloud.google.com/go v0.116.0 // indirect
-	cloud.google.com/go/auth v0.14.0 // indirect
-	cloud.google.com/go/compute/metadata v0.9.0 // indirect
-	github.com/anthropics/anthropic-sdk-go v1.41.0 // indirect
-	github.com/bahlo/generic-list-go v0.2.0 // indirect
-	github.com/buger/jsonparser v1.1.2 // indirect
-	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/s2a-go v0.1.9 // indirect
-	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
-	github.com/googleapis/gax-go/v2 v2.14.1 // indirect
-	github.com/invopop/jsonschema v0.13.0 // indirect
-	github.com/mailru/easyjson v0.7.7 // indirect
-	github.com/openai/openai-go v1.12.0 // indirect
-	github.com/standard-webhooks/standard-webhooks/libraries v0.0.0-20260427160145-3afa6683f8b2 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
-	github.com/tidwall/match v1.1.1 // indirect
-	github.com/tidwall/pretty v1.2.1 // indirect
-	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.54.0 // indirect
-	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	google.golang.org/genai v1.56.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
-	google.golang.org/grpc v1.79.3 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (
@@ -89,6 +58,7 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect
 	go.opentelemetry.io/otel/metric v1.39.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.39.0 // indirect
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
@@ -98,4 +68,4 @@ require (
 	golang.org/x/text v0.32.0 // indirect
 )
 
-replace github.com/mozilla-ai/any-llm-go => /home/mdfranz/github/any-llm-go
+replace github.com/amit-timalsina/pi-llm-go => /home/mdfranz/github/pi-llm-go

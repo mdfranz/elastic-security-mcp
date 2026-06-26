@@ -21,14 +21,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mfranz/elastic-security-mcp/internal/llm"
+	llm "github.com/amit-timalsina/pi-llm-go"
+	"github.com/amit-timalsina/pi-llm-go/providers/anthropic"
+	"github.com/amit-timalsina/pi-llm-go/providers/gemini"
+	"github.com/amit-timalsina/pi-llm-go/providers/openai"
+	internalLlm "github.com/mfranz/elastic-security-mcp/internal/llm"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/mfranz/elastic-security-mcp/internal/webui"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	anyllm "github.com/mozilla-ai/any-llm-go"
-	"github.com/mozilla-ai/any-llm-go/providers/anthropic"
-	"github.com/mozilla-ai/any-llm-go/providers/gemini"
-	"github.com/mozilla-ai/any-llm-go/providers/openai"
 	"github.com/spf13/cobra"
 )
 
@@ -110,13 +110,13 @@ var (
 // Messages
 type generateMsg struct{}
 type llmResponseMsg struct {
-	resp *anyllm.ChatCompletion
+	resp *llm.Message
 }
 type executeToolsMsg struct {
-	toolCalls []anyllm.ToolCall
+	toolCalls []llm.ToolCallBlock
 }
 type toolsResultMsg struct {
-	results  []anyllm.Message
+	results  []llm.Message
 	outcomes []toolOutcome
 }
 type errMsg struct {
@@ -144,11 +144,11 @@ const (
 type model struct {
 	ctx        context.Context
 	mcpSession *mcp.ClientSession
-	llmClient  anyllm.Provider
-	anyTools   []anyllm.Tool
-	history    []anyllm.Message
+	llmClient  llm.LLM
+	tools      []llm.Tool
+	history    []llm.Message
 	modelName  string
-	mem        *llm.ConversationBuffer
+	mem        *internalLlm.ConversationBuffer
 	useMemory  bool
 	lastInput  string
 	inputHist  []string
@@ -175,7 +175,7 @@ type model struct {
 	ready        bool
 }
 
-func initialModel(ctx context.Context, session *mcp.ClientSession, client anyllm.Provider, tools []anyllm.Tool, modelName string, useMemory bool) model {
+func initialModel(ctx context.Context, session *mcp.ClientSession, client llm.LLM, tools []llm.Tool, modelName string, useMemory bool) model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask about security data..."
 	ti.Focus()
@@ -201,9 +201,9 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client anyllm
 		ctx:        ctx,
 		mcpSession: session,
 		llmClient:  client,
-		anyTools:   tools,
+		tools:      tools,
 		modelName:  modelName,
-		mem:        llm.NewConversationBuffer(),
+		mem:        internalLlm.NewConversationBuffer(),
 		useMemory:  useMemory,
 		inputHist:  loadHistory(),
 		histIndex:  -1,
@@ -212,13 +212,8 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client anyllm
 		renderer:   renderer,
 		isDark:     isDark,
 		focus:      focusInput,
-		history: []anyllm.Message{
-			{
-				Role:    anyllm.RoleSystem,
-				Content: systemPrompt,
-			},
-		},
-		messages: []string{},
+		history:    []llm.Message{},
+		messages:   []string{},
 	}
 }
 
@@ -377,7 +372,7 @@ func (m model) renderFooterMetaLine(width int) string {
 	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }
 
-func summarizeToolCalls(toolCalls []anyllm.ToolCall) string {
+func summarizeToolCalls(toolCalls []llm.ToolCallBlock) string {
 	if len(toolCalls) == 0 {
 		return "Waiting for assistant response..."
 	}
@@ -452,9 +447,7 @@ func (m *model) pruneHistory() {
 	if len(m.history) <= maxHistoryMessages {
 		return
 	}
-	pruned := []anyllm.Message{m.history[0]}
-	pruned = append(pruned, m.history[len(m.history)-maxHistoryMessages+1:]...)
-	m.history = pruned
+	m.history = m.history[len(m.history)-maxHistoryMessages:]
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -554,9 +547,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, fmt.Sprintf("%s %s", userStyle.Render("You:"), wrappedUser))
 			m.appendConversation("user", input)
 
-			m.history = append(m.history, anyllm.Message{
-				Role:    anyllm.RoleUser,
-				Content: input,
+			m.history = append(m.history, llm.Message{
+				Role:    llm.RoleUser,
+				Content: []llm.Block{llm.TextBlock{Text: input}},
 			})
 
 			if !m.useMemory {
@@ -599,8 +592,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spCmd
 
 	case llmResponseMsg:
-		if msg.resp == nil || len(msg.resp.Choices) == 0 {
-			m.err = errors.New("LLM returned no choices")
+		if msg.resp == nil {
+			m.err = errors.New("LLM returned no message")
 			m.isThinking = false
 			m.statusText = ""
 			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
@@ -608,44 +601,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		choice := msg.resp.Choices[0]
+		resp := msg.resp
 
-		m.history = append(m.history, choice.Message)
+		m.history = append(m.history, *resp)
 
 		// Detect stalling
-		content := strings.ToLower(choice.Message.ContentString())
-		if len(choice.Message.ToolCalls) == 0 && (strings.Contains(content, "i will") ||
+		respText := messageText(*resp)
+		content := strings.ToLower(respText)
+		toolCalls := messageToolCalls(*resp)
+		if len(toolCalls) == 0 && (strings.Contains(content, "i will") ||
 			strings.Contains(content, "let me") ||
 			strings.Contains(content, "now i'll") ||
 			strings.Contains(content, "searching")) {
 
-			m.history = append(m.history, anyllm.Message{
-				Role:    anyllm.RoleUser,
-				Content: "Please proceed with the tool call immediately. Do not narrate your intent.",
+			m.history = append(m.history, llm.Message{
+				Role:    llm.RoleUser,
+				Content: []llm.Block{llm.TextBlock{Text: "Please proceed with the tool call immediately. Do not narrate your intent."}},
 			})
 			return m, m.generateResponse()
 		}
 
 		// Display content if any
-		if choice.Message.ContentString() != "" && len(choice.Message.ToolCalls) == 0 {
-			rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(choice.Message.ContentString()))
+		if respText != "" && len(toolCalls) == 0 {
+			rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(respText))
 			if err != nil {
-				rendered = choice.Message.ContentString()
+				rendered = respText
 			}
 			m.messages = append(m.messages, fmt.Sprintf("%s\n%s", assistantStyle.Render("Assistant:"), rendered))
-			m.appendConversation("assistant", choice.Message.ContentString())
+			m.appendConversation("assistant", respText)
 		}
 
 		// Handle tool calls
-		if len(choice.Message.ToolCalls) > 0 {
-			m.statusText = summarizeToolCalls(choice.Message.ToolCalls) + " Tool lines above are intermediate."
-			for _, tc := range choice.Message.ToolCalls {
+		if len(toolCalls) > 0 {
+			m.statusText = summarizeToolCalls(toolCalls) + " Tool lines above are intermediate."
+			for _, tc := range toolCalls {
 				header := toolStyle.Render(fmt.Sprintf("[%s] args:", toolCallName(tc)))
 				body := toolJSONStyle.Copy().Width(m.viewport.Width).Render(formatToolCallArguments(tc))
 				m.messages = append(m.messages, header+"\n"+body+"\n")
 			}
 			m.refreshViewport(false)
-			return m, m.executeTools(choice.Message.ToolCalls)
+			return m, m.executeTools(toolCalls)
 		}
 
 		// Done — save completed turn to memory
@@ -653,7 +648,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.useMemory {
 				_ = m.mem.SaveContext(m.ctx,
 					map[string]any{"input": m.lastInput},
-					map[string]any{"output": choice.Message.ContentString()},
+					map[string]any{"output": respText},
 				)
 			}
 			m.lastInput = ""
@@ -735,24 +730,25 @@ func (m model) View() string {
 	return s
 }
 
-func toolCallName(tc anyllm.ToolCall) string {
-	if tc.Function.Name == "" {
+func toolCallName(tc llm.ToolCallBlock) string {
+	if tc.Name == "" {
 		return "(missing)"
 	}
-	return tc.Function.Name
+	return tc.Name
 }
 
-func toolCallArguments(tc anyllm.ToolCall) string {
-	if tc.Function.Arguments == "" {
+func toolCallArguments(tc llm.ToolCallBlock) string {
+	if len(tc.Arguments) == 0 {
 		return "{}"
 	}
-	if strings.TrimSpace(tc.Function.Arguments) == "" {
+	s := string(tc.Arguments)
+	if strings.TrimSpace(s) == "" {
 		return "{}"
 	}
-	return tc.Function.Arguments
+	return s
 }
 
-func formatToolCallArguments(tc anyllm.ToolCall) string {
+func formatToolCallArguments(tc llm.ToolCallBlock) string {
 	raw := toolCallArguments(tc)
 	if raw == "{}" {
 		return raw
@@ -834,6 +830,26 @@ func formatToolCallArguments(tc anyllm.ToolCall) string {
 	return strings.Join(final, "\n")
 }
 
+func messageText(msg llm.Message) string {
+	var sb strings.Builder
+	for _, block := range msg.Content {
+		if tb, ok := block.(llm.TextBlock); ok {
+			sb.WriteString(tb.Text)
+		}
+	}
+	return sb.String()
+}
+
+func messageToolCalls(msg llm.Message) []llm.ToolCallBlock {
+	var calls []llm.ToolCallBlock
+	for _, block := range msg.Content {
+		if tc, ok := block.(llm.ToolCallBlock); ok {
+			calls = append(calls, tc)
+		}
+	}
+	return calls
+}
+
 func extractToolContent(toolResp *mcp.CallToolResult) string {
 	if toolResp == nil {
 		return ""
@@ -850,49 +866,44 @@ func extractToolContent(toolResp *mcp.CallToolResult) string {
 	return sb.String()
 }
 
-func summarizeHistoryForLog(history []anyllm.Message) string {
+func summarizeHistoryForLog(history []llm.Message) string {
 	type partSummary map[string]any
 	type messageSummary map[string]any
 
 	summary := make([]messageSummary, 0, len(history))
 	for i, msg := range history {
-		parts := make([]partSummary, 0)
-		
-		if textContent := msg.ContentString(); textContent != "" {
-			parts = append(parts, partSummary{
-				"type":    "text",
-				"chars":   len(textContent),
-				"preview": util.TruncateForLog(textContent, 160),
-			})
+		var parts []partSummary
+		for _, block := range msg.Content {
+			switch b := block.(type) {
+			case llm.TextBlock:
+				parts = append(parts, partSummary{
+					"type":    "text",
+					"chars":   len(b.Text),
+					"preview": util.TruncateForLog(b.Text, 160),
+				})
+			case llm.ToolCallBlock:
+				parts = append(parts, partSummary{
+					"type":      "tool_call",
+					"name":      b.Name,
+					"id":        b.ID,
+					"arg_chars": len(b.Arguments),
+					"args":      util.TruncateForLog(string(b.Arguments), 240),
+				})
+			case llm.ToolResultBlock:
+				parts = append(parts, partSummary{
+					"type":         "tool_response",
+					"tool_call_id": b.ToolCallID,
+					"chars":        len(b.Content),
+					"preview":      util.TruncateForLog(b.Content, 240),
+				})
+			}
 		}
-		
-		for _, tc := range msg.ToolCalls {
-			parts = append(parts, partSummary{
-				"type":      "tool_call",
-				"name":      toolCallName(tc),
-				"id":        tc.ID,
-				"arg_chars": len(toolCallArguments(tc)),
-				"args":      util.TruncateForLog(toolCallArguments(tc), 240),
-			})
-		}
-		
-		if msg.Role == anyllm.RoleTool {
-			parts = append(parts, partSummary{
-				"type":         "tool_response",
-				"name":         msg.Name,
-				"tool_call_id": msg.ToolCallID,
-				"chars":        len(msg.ContentString()),
-				"preview":      util.TruncateForLog(msg.ContentString(), 240),
-			})
-		}
-
 		summary = append(summary, messageSummary{
 			"index": i,
 			"role":  msg.Role,
 			"parts": parts,
 		})
 	}
-
 	b, err := json.Marshal(summary)
 	if err != nil {
 		return fmt.Sprintf("failed to summarize history: %v", err)
@@ -904,7 +915,7 @@ func (m model) generateResponse() tea.Cmd {
 	return func() tea.Msg {
 		slog.Debug("LLM request summary",
 			"model", m.modelName,
-			"tool_count", len(m.anyTools),
+			"tool_count", len(m.tools),
 			"message_count", len(m.history),
 			"summary", summarizeHistoryForLog(m.history),
 		)
@@ -913,24 +924,22 @@ func (m model) generateResponse() tea.Cmd {
 			if err == nil {
 				slog.Debug("Sending history to LLM", "history", util.TruncateForLog(string(histJSON), maxLoggedPayloadChars))
 			}
-			toolsJSON, err := json.Marshal(m.anyTools)
+			toolsJSON, err := json.Marshal(m.tools)
 			if err == nil {
 				slog.Debug("Sending tools to LLM", "tools", util.TruncateForLog(string(toolsJSON), maxLoggedPayloadChars))
 			}
 		}
 
-		var (
-			tempZero      = 0.0
-			maxTokens4096 = 4096
-		)
+		var tempZero = 0.0
 
-		resp, err := util.WithRetry(m.ctx, func() (*anyllm.ChatCompletion, error) {
-			return m.llmClient.Completion(m.ctx, anyllm.CompletionParams{
+		resp, err := util.WithRetry(m.ctx, func() (*llm.Message, error) {
+			return llm.Complete(m.ctx, m.llmClient, llm.Request{
 				Model:       m.modelName,
+				System:      systemPrompt,
 				Messages:    m.history,
-				Tools:       m.anyTools,
+				Tools:       m.tools,
 				Temperature: &tempZero,
-				MaxTokens:   &maxTokens4096,
+				MaxTokens:   4096,
 			})
 		})
 		if err != nil {
@@ -949,9 +958,9 @@ func (m model) generateResponse() tea.Cmd {
 	}
 }
 
-func (m model) executeTools(toolCalls []anyllm.ToolCall) tea.Cmd {
+func (m model) executeTools(toolCalls []llm.ToolCallBlock) tea.Cmd {
 	return func() tea.Msg {
-		toolResultMessages := []anyllm.Message{}
+		toolResultMessages := []llm.Message{}
 		outcomes := make([]toolOutcome, 0, len(toolCalls))
 		for _, tc := range toolCalls {
 			name := toolCallName(tc)
@@ -961,36 +970,40 @@ func (m model) executeTools(toolCalls []anyllm.ToolCall) tea.Cmd {
 				slog.Debug("Tool arguments", "name", name, "args", util.TruncateForLog(argsJSON, maxLoggedPayloadChars))
 			}
 
-			if tc.Function.Name == "" {
-				toolResultMessages = append(toolResultMessages, anyllm.Message{
-					Role:       anyllm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       name,
-					Content:    "invalid tool call: missing function name",
+			if tc.Name == "" {
+				toolResultMessages = append(toolResultMessages, llm.Message{
+					Role: llm.RoleTool,
+					Content: []llm.Block{llm.ToolResultBlock{
+						ToolCallID: tc.ID,
+						Content:    "invalid tool call: missing function name",
+						IsError:    true,
+					}},
 				})
 				continue
 			}
 
 			var args map[string]any
 			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-				toolResultMessages = append(toolResultMessages, anyllm.Message{
-					Role:       anyllm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
-					Content:    fmt.Sprintf("invalid tool arguments: %v", err),
+				toolResultMessages = append(toolResultMessages, llm.Message{
+					Role: llm.RoleTool,
+					Content: []llm.Block{llm.ToolResultBlock{
+						ToolCallID: tc.ID,
+						Content:    fmt.Sprintf("invalid tool arguments: %v", err),
+						IsError:    true,
+					}},
 				})
 				continue
 			}
 
 			toolResp, err := m.mcpSession.CallTool(m.ctx, &mcp.CallToolParams{
-				Name:      tc.Function.Name,
+				Name:      tc.Name,
 				Arguments: args,
 			})
 
 			var resultText string
 			switch {
 			case err != nil:
-				slog.Error("Tool call error", "name", tc.Function.Name, "error", err)
+				slog.Error("Tool call error", "name", tc.Name, "error", err)
 				resultText = fmt.Sprintf("error calling tool: %v", err)
 			case toolResp.IsError:
 				resultText = extractToolContent(toolResp)
@@ -998,13 +1011,13 @@ func (m model) executeTools(toolCalls []anyllm.ToolCall) tea.Cmd {
 					resultText = "tool returned an error"
 				}
 				slog.Warn("Tool returned error status",
-					"name", tc.Function.Name,
+					"name", tc.Name,
 					"error_preview", util.TruncateForLog(resultText, 500),
 				)
 			default:
 				resultText = extractToolContent(toolResp)
 				slog.Debug("Tool execution successful",
-					"name", tc.Function.Name,
+					"name", tc.Name,
 					"result_len", len(resultText),
 					"result_preview", util.TruncateForLog(resultText, 500),
 				)
@@ -1016,11 +1029,13 @@ func (m model) executeTools(toolCalls []anyllm.ToolCall) tea.Cmd {
 				isError:  err != nil || (toolResp != nil && toolResp.IsError),
 			})
 
-			toolResultMessages = append(toolResultMessages, anyllm.Message{
-				Role:       anyllm.RoleTool,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    resultText,
+			toolResultMessages = append(toolResultMessages, llm.Message{
+				Role: llm.RoleTool,
+				Content: []llm.Block{llm.ToolResultBlock{
+					ToolCallID: tc.ID,
+					Content:    resultText,
+					IsError:    err != nil || (toolResp != nil && toolResp.IsError),
+				}},
 			})
 		}
 		return toolsResultMsg{results: toolResultMessages, outcomes: outcomes}
@@ -1202,7 +1217,7 @@ func runSinglePrompt(modelFlag string, prompt string) {
 		modelName = "gemini-2.0-flash"
 	}
 
-	var llmClient anyllm.Provider
+	var llmClient llm.LLM
 
 	openaiKey := os.Getenv("OPENAI_API_KEY")
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
@@ -1214,19 +1229,19 @@ func runSinglePrompt(modelFlag string, prompt string) {
 			fmt.Fprintln(os.Stderr, "OPENAI_API_KEY is required for openai models")
 			os.Exit(1)
 		}
-		llmClient, err = openai.New(anyllm.WithAPIKey(openaiKey))
+		llmClient, err = openai.New(openai.Options{APIKey: openaiKey})
 	case "anthropic":
 		if anthropicKey == "" {
 			fmt.Fprintln(os.Stderr, "ANTHROPIC_API_KEY is required for anthropic models")
 			os.Exit(1)
 		}
-		llmClient, err = anthropic.New(anyllm.WithAPIKey(anthropicKey))
+		llmClient, err = anthropic.New(anthropic.Options{APIKey: anthropicKey})
 	case "gemini":
 		if geminiKey == "" {
 			fmt.Fprintln(os.Stderr, "GEMINI_API_KEY is required for gemini models")
 			os.Exit(1)
 		}
-		llmClient, err = gemini.New(anyllm.WithAPIKey(geminiKey))
+		llmClient, err = gemini.New(gemini.Options{APIKey: geminiKey})
 	default:
 		fmt.Fprintf(os.Stderr, "Unsupported model prefix: %s\n", modelName)
 		os.Exit(1)
@@ -1255,103 +1270,106 @@ func runSinglePrompt(modelFlag string, prompt string) {
 		os.Exit(1)
 	}
 
-	anyTools := make([]anyllm.Tool, 0, len(toolsResult.Tools))
+	tools := make([]llm.Tool, 0, len(toolsResult.Tools))
 	toolNames := make([]string, 0, len(toolsResult.Tools))
 	for _, t := range toolsResult.Tools {
 		toolNames = append(toolNames, t.Name)
-		anyTools = append(anyTools, anyllm.Tool{
-			Type: "function",
-			Function: anyllm.Function{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  convertSchema(t.InputSchema),
-			},
+		schemaBytes := convertSchema(t.InputSchema)
+		tools = append(tools, llm.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: schemaBytes,
 		})
 	}
-	slog.Info("Discovered tools", "count", len(anyTools), "names", toolNames)
+	slog.Info("Discovered tools", "count", len(tools), "names", toolNames)
 
-	history := []anyllm.Message{
+	history := []llm.Message{
 		{
-			Role:    anyllm.RoleSystem,
-			Content: systemPrompt,
-		},
-		{
-			Role:    anyllm.RoleUser,
-			Content: prompt,
+			Role:    llm.RoleUser,
+			Content: []llm.Block{llm.TextBlock{Text: prompt}},
 		},
 	}
 
 	for {
-		resp, err := util.WithRetry(ctx, func() (*anyllm.ChatCompletion, error) {
-			return llmClient.Completion(ctx, anyllm.CompletionParams{
+		resp, err := util.WithRetry(ctx, func() (*llm.Message, error) {
+			return llm.Complete(ctx, llmClient, llm.Request{
 				Model:    modelName,
+				System:   systemPrompt,
 				Messages: history,
-				Tools:    anyTools,
+				Tools:    tools,
 			})
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
 			os.Exit(1)
 		}
-		if resp == nil || len(resp.Choices) == 0 {
-			fmt.Fprintln(os.Stderr, "Generation error: LLM returned no choices")
+		if resp == nil {
+			fmt.Fprintln(os.Stderr, "Generation error: LLM returned no message")
 			os.Exit(1)
 		}
 
-		choice := resp.Choices[0]
-		if choice.Message.ContentString() != "" {
-			fmt.Println(choice.Message.ContentString())
+		respText := messageText(*resp)
+		if respText != "" {
+			fmt.Println(respText)
 		}
 
-		if len(choice.Message.ToolCalls) == 0 {
+		toolCalls := messageToolCalls(*resp)
+		if len(toolCalls) == 0 {
 			break
 		}
 
-		for _, tc := range choice.Message.ToolCalls {
+		for _, tc := range toolCalls {
 			fmt.Printf("Calling tool: %s\n", toolCallName(tc))
 		}
 
-		history = append(history, choice.Message)
+		history = append(history, *resp)
 
-		toolResults := []anyllm.Message{}
-		for _, tc := range choice.Message.ToolCalls {
-			if tc.Function.Name == "" {
-				toolResults = append(toolResults, anyllm.Message{
-					Role:       anyllm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       toolCallName(tc),
-					Content:    "invalid tool call: missing function name",
+		toolResults := []llm.Message{}
+		for _, tc := range toolCalls {
+			if tc.Name == "" {
+				toolResults = append(toolResults, llm.Message{
+					Role: llm.RoleTool,
+					Content: []llm.Block{llm.ToolResultBlock{
+						ToolCallID: tc.ID,
+						Content:    "invalid tool call: missing function name",
+						IsError:    true,
+					}},
 				})
 				continue
 			}
 
 			var args map[string]any
-			if err := json.Unmarshal([]byte(toolCallArguments(tc)), &args); err != nil {
-				toolResults = append(toolResults, anyllm.Message{
-					Role:       anyllm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
-					Content:    fmt.Sprintf("invalid tool arguments: %v", err),
+			if err := json.Unmarshal(tc.Arguments, &args); err != nil {
+				toolResults = append(toolResults, llm.Message{
+					Role: llm.RoleTool,
+					Content: []llm.Block{llm.ToolResultBlock{
+						ToolCallID: tc.ID,
+						Content:    fmt.Sprintf("invalid tool arguments: %v", err),
+						IsError:    true,
+					}},
 				})
 				continue
 			}
 
 			toolResp, err := session.CallTool(ctx, &mcp.CallToolParams{
-				Name:      tc.Function.Name,
+				Name:      tc.Name,
 				Arguments: args,
 			})
 
 			resultText := ""
+			isError := err != nil || (toolResp != nil && toolResp.IsError)
 			if err != nil {
 				resultText = fmt.Sprintf("error: %v", err)
 			} else {
 				resultText = extractToolContent(toolResp)
 			}
-			toolResults = append(toolResults, anyllm.Message{
-				Role:       anyllm.RoleTool,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    resultText,
+			toolResults = append(toolResults, llm.Message{
+				Role: llm.RoleTool,
+				Content: []llm.Block{llm.ToolResultBlock{
+					ToolCallID: tc.ID,
+					Content:    resultText,
+					IsError:    isError,
+				}},
 			})
 		}
 
@@ -1379,7 +1397,7 @@ func runWebUI(modelFlag string, memoryFlag bool, port int) {
 	}
 }
 
-func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, anyllm.Provider, []anyllm.Tool, string, error) {
+func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llm.LLM, []llm.Tool, string, error) {
 	// 1. Logging Setup (keep slog for background details)
 	logFile := util.ClientLogFile()
 
@@ -1399,7 +1417,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, anyllm
 
 	// LLM Setup
 	var modelName string
-	var llmClient anyllm.Provider
+	var llmClient llm.LLM
 
 	elasticModel := modelFlag
 	if elasticModel == "" {
@@ -1505,17 +1523,17 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, anyllm
 		if openaiKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("OPENAI_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = openai.New(anyllm.WithAPIKey(openaiKey))
+		llmClient, err = openai.New(openai.Options{APIKey: openaiKey})
 	case "anthropic":
 		if anthropicKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("ANTHROPIC_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = anthropic.New(anyllm.WithAPIKey(anthropicKey))
+		llmClient, err = anthropic.New(anthropic.Options{APIKey: anthropicKey})
 	case "gemini":
 		if geminiKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("GEMINI_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = gemini.New(anyllm.WithAPIKey(geminiKey))
+		llmClient, err = gemini.New(gemini.Options{APIKey: geminiKey})
 	default:
 		return nil, nil, nil, "", fmt.Errorf("unsupported model prefix: %s", modelName)
 	}
@@ -1540,29 +1558,27 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, anyllm
 		return nil, nil, nil, "", fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	anyTools := make([]anyllm.Tool, 0, len(toolsResult.Tools))
+	tools := make([]llm.Tool, 0, len(toolsResult.Tools))
 	toolNames := make([]string, 0, len(toolsResult.Tools))
 	for _, t := range toolsResult.Tools {
 		toolNames = append(toolNames, t.Name)
-		anyTools = append(anyTools, anyllm.Tool{
-			Type: "function",
-			Function: anyllm.Function{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  convertSchema(t.InputSchema),
-			},
+		schemaBytes := convertSchema(t.InputSchema)
+		tools = append(tools, llm.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: schemaBytes,
 		})
 	}
-	slog.Info("Discovered tools", "count", len(anyTools), "names", toolNames)
+	slog.Info("Discovered tools", "count", len(tools), "names", toolNames)
 
-	return session, llmClient, anyTools, modelName, nil
+	return session, llmClient, tools, modelName, nil
 }
 
 func runApp(modelFlag string, memoryFlag bool) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	session, llmClient, anyTools, modelName, err := setupApp(ctx, modelFlag)
+	session, llmClient, tools, modelName, err := setupApp(ctx, modelFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
@@ -1570,7 +1586,7 @@ func runApp(modelFlag string, memoryFlag bool) {
 	defer session.Close()
 
 	// Run Bubble Tea
-	p := tea.NewProgram(initialModel(ctx, session, llmClient, anyTools, modelName, memoryFlag), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(ctx, session, llmClient, tools, modelName, memoryFlag), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
@@ -1610,7 +1626,22 @@ func saveHistory(input string) {
 	}
 }
 
-func convertSchema(schema any) map[string]any {
+func cleanSchema(m map[string]any) {
+	delete(m, "additionalProperties")
+	for _, v := range m {
+		if subMap, ok := v.(map[string]any); ok {
+			cleanSchema(subMap)
+		} else if slice, ok := v.([]any); ok {
+			for _, item := range slice {
+				if subMap, ok := item.(map[string]any); ok {
+					cleanSchema(subMap)
+				}
+			}
+		}
+	}
+}
+
+func convertSchema(schema any) json.RawMessage {
 	if schema == nil {
 		return nil
 	}
@@ -1629,10 +1660,15 @@ func convertSchema(schema any) map[string]any {
 			return nil
 		}
 	}
+	cleanSchema(res)
 	if t, _ := res["type"].(string); t == "object" {
 		if _, hasProps := res["properties"]; !hasProps {
 			res["properties"] = map[string]any{}
 		}
 	}
-	return res
+	b, err := json.Marshal(res)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(b)
 }

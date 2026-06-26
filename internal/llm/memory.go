@@ -6,20 +6,20 @@ import (
 	"strings"
 	"sync"
 
-	anyllm "github.com/mozilla-ai/any-llm-go"
+	llm "github.com/amit-timalsina/pi-llm-go"
 )
 
 // ConversationBuffer stores conversational history in memory.
 // This replaces github.com/tmc/langchaingo/memory.ConversationBuffer.
 type ConversationBuffer struct {
 	mu       sync.Mutex
-	messages []anyllm.Message
+	messages []llm.Message
 }
 
 // NewConversationBuffer creates a new ConversationBuffer.
 func NewConversationBuffer() *ConversationBuffer {
 	return &ConversationBuffer{
-		messages: make([]anyllm.Message, 0),
+		messages: make([]llm.Message, 0),
 	}
 }
 
@@ -32,15 +32,15 @@ func (cb *ConversationBuffer) SaveContext(ctx context.Context, input map[string]
 	outStr, _ := output["output"].(string)
 
 	if inStr != "" {
-		cb.messages = append(cb.messages, anyllm.Message{
-			Role:    anyllm.RoleUser,
-			Content: inStr,
+		cb.messages = append(cb.messages, llm.Message{
+			Role:    llm.RoleUser,
+			Content: []llm.Block{llm.TextBlock{Text: inStr}},
 		})
 	}
 	if outStr != "" {
-		cb.messages = append(cb.messages, anyllm.Message{
-			Role:    anyllm.RoleAssistant,
-			Content: outStr,
+		cb.messages = append(cb.messages, llm.Message{
+			Role:    llm.RoleAssistant,
+			Content: []llm.Block{llm.TextBlock{Text: outStr}},
 		})
 	}
 
@@ -55,10 +55,16 @@ func (cb *ConversationBuffer) LoadMemoryVariables(ctx context.Context, _ map[str
 	var sb strings.Builder
 	for _, msg := range cb.messages {
 		roleLabel := "Human"
-		if msg.Role == anyllm.RoleAssistant {
+		if msg.Role == llm.RoleAssistant {
 			roleLabel = "AI"
 		}
-		sb.WriteString(fmt.Sprintf("%s: %s\n", roleLabel, msg.ContentString()))
+		var text string
+		for _, block := range msg.Content {
+			if tb, ok := block.(llm.TextBlock); ok {
+				text += tb.Text
+			}
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n", roleLabel, text))
 	}
 
 	return map[string]any{

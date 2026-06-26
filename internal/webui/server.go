@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"strings"
 
+	llm "github.com/amit-timalsina/pi-llm-go"
 	"github.com/gorilla/websocket"
-	"github.com/mfranz/elastic-security-mcp/internal/llm"
+	internalLlm "github.com/mfranz/elastic-security-mcp/internal/llm"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	anyllm "github.com/mozilla-ai/any-llm-go"
 )
 
 //go:embed assets/*
@@ -57,17 +57,17 @@ type ToolEvent struct {
 
 type Server struct {
 	mcpSession *mcp.ClientSession
-	llmClient  anyllm.Provider
-	anyTools   []anyllm.Tool
+	llmClient  llm.LLM
+	tools      []llm.Tool
 	modelName  string
 	useMemory  bool
 }
 
-func RunServer(ctx context.Context, session *mcp.ClientSession, client anyllm.Provider, tools []anyllm.Tool, modelName string, port int, useMemory bool) error {
+func RunServer(ctx context.Context, session *mcp.ClientSession, client llm.LLM, tools []llm.Tool, modelName string, port int, useMemory bool) error {
 	s := &Server{
 		mcpSession: session,
 		llmClient:  client,
-		anyTools:   tools,
+		tools:      tools,
 		modelName:  modelName,
 		useMemory:  useMemory,
 	}
@@ -101,8 +101,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Initial setup message
 	s.sendMessage(conn, WebMessage{Type: "setup", Model: s.modelName})
 
-	history := newConversationHistory()
-	connMem := llm.NewConversationBuffer()
+	history := []llm.Message{}
+	connMem := internalLlm.NewConversationBuffer()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -118,8 +118,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.Type == "reset" {
-			history = newConversationHistory()
-			connMem = llm.NewConversationBuffer()
+			history = []llm.Message{}
+			connMem = internalLlm.NewConversationBuffer()
 			s.sendMessage(conn, WebMessage{Type: "system", Content: "New session started. Previous context cleared."})
 			s.sendMessage(conn, WebMessage{Type: "clear_status"})
 			continue
@@ -149,9 +149,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 			s.sendMessage(conn, WebMessage{Type: "user", Content: userInput})
 
-			history = append(history, anyllm.Message{
-				Role:    anyllm.RoleUser,
-				Content: userInput,
+			history = append(history, llm.Message{
+				Role:    llm.RoleUser,
+				Content: []llm.Block{llm.TextBlock{Text: userInput}},
 			})
 
 			// Conversation loop
@@ -160,23 +160,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]anyllm.Message, connMem *llm.ConversationBuffer, lastUserInput string) {
+func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]llm.Message, connMem *internalLlm.ConversationBuffer, lastUserInput string) {
 	for {
 		s.sendMessage(conn, WebMessage{Type: "status", Content: "Analyzing request...", Thinking: true})
 		slog.Info("LLM request", "history_len", len(*history), "model", s.modelName)
 		
-		var (
-			tempZero      = 0.0
-			maxTokens4096 = 4096
-		)
+		var tempZero = 0.0
 
-		resp, err := util.WithRetry(ctx, func() (*anyllm.ChatCompletion, error) {
-			return s.llmClient.Completion(ctx, anyllm.CompletionParams{
+		resp, err := util.WithRetry(ctx, func() (*llm.Message, error) {
+			return llm.Complete(ctx, s.llmClient, llm.Request{
 				Model:       s.modelName,
+				System:      systemPrompt,
 				Messages:    *history,
-				Tools:       s.anyTools,
+				Tools:       s.tools,
 				Temperature: &tempZero,
-				MaxTokens:   &maxTokens4096,
+				MaxTokens:   4096,
 			})
 		})
 
@@ -186,47 +184,51 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 			return
 		}
 
-		if resp == nil || len(resp.Choices) == 0 {
-			s.sendMessage(conn, WebMessage{Type: "error", Content: "LLM returned no choices"})
+		if resp == nil {
+			s.sendMessage(conn, WebMessage{Type: "error", Content: "LLM returned no message"})
 			s.sendMessage(conn, WebMessage{Type: "clear_status"})
 			return
 		}
 
-		choice := resp.Choices[0]
-		*history = append(*history, choice.Message)
+		*history = append(*history, *resp)
 
 		// Detect stalling (copy logic from main.go)
-		content := strings.ToLower(choice.Message.ContentString())
-		if len(choice.Message.ToolCalls) == 0 && (strings.Contains(content, "i will") ||
+		respText := messageText(*resp)
+		content := strings.ToLower(respText)
+		toolCalls := messageToolCalls(*resp)
+		if len(toolCalls) == 0 && (strings.Contains(content, "i will") ||
 			strings.Contains(content, "let me") ||
 			strings.Contains(content, "now i'll") ||
 			strings.Contains(content, "searching")) {
 
-			*history = append(*history, anyllm.Message{
-				Role:    anyllm.RoleUser,
-				Content: "Please proceed with the tool call immediately. Do not narrate your intent.",
+			*history = append(*history, llm.Message{
+				Role:    llm.RoleUser,
+				Content: []llm.Block{llm.TextBlock{Text: "Please proceed with the tool call immediately. Do not narrate your intent."}},
 			})
 			continue
 		}
 
-		if choice.Message.ContentString() != "" && len(choice.Message.ToolCalls) == 0 {
-			s.sendMessage(conn, WebMessage{Type: "assistant", Content: choice.Message.ContentString()})
+		if respText != "" && len(toolCalls) == 0 {
+			s.sendMessage(conn, WebMessage{Type: "assistant", Content: respText})
 
 			if s.useMemory && lastUserInput != "" {
 				_ = connMem.SaveContext(ctx,
 					map[string]any{"input": lastUserInput},
-					map[string]any{"output": choice.Message.ContentString()},
+					map[string]any{"output": respText},
 				)
 			}
 		}
 
-		if len(choice.Message.ToolCalls) > 0 {
-			s.sendMessage(conn, WebMessage{Type: "status", Content: summarizeToolCalls(choice.Message.ToolCalls), Thinking: true})
+		if len(toolCalls) > 0 {
+			s.sendMessage(conn, WebMessage{Type: "status", Content: summarizeToolCalls(toolCalls), Thinking: true})
 
-			toolResults := []anyllm.Message{}
-			for i, tc := range choice.Message.ToolCalls {
-				name := tc.Function.Name
-				argsJSON := tc.Function.Arguments
+			toolResults := []llm.Message{}
+			for i, tc := range toolCalls {
+				name := tc.Name
+				argsJSON := string(tc.Arguments)
+				if argsJSON == "" {
+					argsJSON = "{}"
+				}
 
 				var args map[string]any
 				if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
@@ -284,11 +286,13 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 					},
 				})
 
-				toolResults = append(toolResults, anyllm.Message{
-					Role:       anyllm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       name,
-					Content:    resultText,
+				toolResults = append(toolResults, llm.Message{
+					Role: llm.RoleTool,
+					Content: []llm.Block{llm.ToolResultBlock{
+						ToolCallID: tc.ID,
+						Content:    resultText,
+						IsError:    isError,
+					}},
 				})
 			}
 
@@ -301,15 +305,6 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 
 		s.sendMessage(conn, WebMessage{Type: "clear_status"})
 		break
-	}
-}
-
-func newConversationHistory() []anyllm.Message {
-	return []anyllm.Message{
-		{
-			Role:    anyllm.RoleSystem,
-			Content: systemPrompt,
-		},
 	}
 }
 
@@ -345,14 +340,14 @@ TOOL SELECTION GUIDE — call the right tool immediately:
 - search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
 - kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
-func summarizeToolCalls(toolCalls []anyllm.ToolCall) string {
+func summarizeToolCalls(toolCalls []llm.ToolCallBlock) string {
 	if len(toolCalls) == 0 {
 		return "Waiting for assistant response..."
 	}
 	names := make([]string, 0, len(toolCalls))
 	for _, tc := range toolCalls {
-		if tc.Function.Name != "" {
-			names = append(names, tc.Function.Name)
+		if tc.Name != "" {
+			names = append(names, tc.Name)
 		}
 	}
 	if len(names) == 0 {
@@ -375,4 +370,24 @@ func extractToolContent(toolResp *mcp.CallToolResult) string {
 		}
 	}
 	return sb.String()
+}
+
+func messageText(msg llm.Message) string {
+	var sb strings.Builder
+	for _, block := range msg.Content {
+		if tb, ok := block.(llm.TextBlock); ok {
+			sb.WriteString(tb.Text)
+		}
+	}
+	return sb.String()
+}
+
+func messageToolCalls(msg llm.Message) []llm.ToolCallBlock {
+	var calls []llm.ToolCallBlock
+	for _, block := range msg.Content {
+		if tc, ok := block.(llm.ToolCallBlock); ok {
+			calls = append(calls, tc)
+		}
+	}
+	return calls
 }
