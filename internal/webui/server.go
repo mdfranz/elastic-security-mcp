@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"strings"
 
-	llm "github.com/amit-timalsina/pi-llm-go"
+	goai "github.com/zendev-sh/goai"
+	goaimcp "github.com/zendev-sh/goai/mcp"
+	"github.com/zendev-sh/goai/provider"
 	"github.com/gorilla/websocket"
-	internalLlm "github.com/mfranz/elastic-security-mcp/internal/llm"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 //go:embed assets/*
@@ -26,12 +26,12 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			return true // Allow requests without Origin header
+			return true
 		}
 		return strings.HasPrefix(origin, "http://localhost") ||
-		       strings.HasPrefix(origin, "https://localhost") ||
-		       strings.HasPrefix(origin, "http://127.0.0.1") ||
-		       strings.HasPrefix(origin, "https://127.0.0.1")
+			strings.HasPrefix(origin, "https://localhost") ||
+			strings.HasPrefix(origin, "http://127.0.0.1") ||
+			strings.HasPrefix(origin, "https://127.0.0.1")
 	},
 }
 
@@ -56,20 +56,20 @@ type ToolEvent struct {
 }
 
 type Server struct {
-	mcpSession *mcp.ClientSession
-	llmClient  llm.LLM
-	tools      []llm.Tool
-	modelName  string
-	useMemory  bool
+	mcpClient *goaimcp.Client
+	llmModel  provider.LanguageModel
+	tools     []goai.Tool
+	modelName string
+	useMemory bool
 }
 
-func RunServer(ctx context.Context, session *mcp.ClientSession, client llm.LLM, tools []llm.Tool, modelName string, port int, useMemory bool) error {
+func RunServer(ctx context.Context, mcpClient *goaimcp.Client, model provider.LanguageModel, tools []goai.Tool, modelName string, port int, useMemory bool) error {
 	s := &Server{
-		mcpSession: session,
-		llmClient:  client,
-		tools:      tools,
-		modelName:  modelName,
-		useMemory:  useMemory,
+		mcpClient: mcpClient,
+		llmModel:  model,
+		tools:     tools,
+		modelName: modelName,
+		useMemory: useMemory,
 	}
 
 	assetFS, err := fs.Sub(assets, "assets")
@@ -98,11 +98,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Initial setup message
 	s.sendMessage(conn, WebMessage{Type: "setup", Model: s.modelName})
 
-	history := []llm.Message{}
-	connMem := internalLlm.NewConversationBuffer()
+	history := []provider.Message{}
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -118,8 +116,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.Type == "reset" {
-			history = []llm.Message{}
-			connMem = internalLlm.NewConversationBuffer()
+			history = []provider.Message{}
 			s.sendMessage(conn, WebMessage{Type: "system", Content: "New session started. Previous context cleared."})
 			s.sendMessage(conn, WebMessage{Type: "clear_status"})
 			continue
@@ -128,54 +125,40 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if req.Type == "user" {
 			userInput := req.Content
 
-			// Handle /memory command
 			if userInput == "/memory" {
 				if !s.useMemory {
 					s.sendMessage(conn, WebMessage{Type: "system", Content: "Conversation memory is disabled."})
 				} else {
-					vars, err := connMem.LoadMemoryVariables(r.Context(), nil)
-					if err != nil {
-						s.sendMessage(conn, WebMessage{Type: "error", Content: fmt.Sprintf("Memory error: %v", err)})
-					} else {
-						hist, _ := vars["history"].(string)
-						if hist == "" {
-							hist = "(empty)"
-						}
-						s.sendMessage(conn, WebMessage{Type: "system", Content: fmt.Sprintf("Conversation Memory:\n%s", hist)})
+					hist := renderHistoryText(history)
+					if hist == "" {
+						hist = "(empty)"
 					}
+					s.sendMessage(conn, WebMessage{Type: "system", Content: fmt.Sprintf("Conversation Memory:\n%s", hist)})
 				}
 				continue
 			}
 
 			s.sendMessage(conn, WebMessage{Type: "user", Content: userInput})
+			history = append(history, goai.UserMessage(userInput))
 
-			history = append(history, llm.Message{
-				Role:    llm.RoleUser,
-				Content: []llm.Block{llm.TextBlock{Text: userInput}},
-			})
-
-			// Conversation loop
-			s.processConversation(r.Context(), conn, &history, connMem, userInput)
+			s.processConversation(r.Context(), conn, &history, userInput)
 		}
 	}
 }
 
-func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]llm.Message, connMem *internalLlm.ConversationBuffer, lastUserInput string) {
+func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]provider.Message, lastUserInput string) {
 	for {
 		s.sendMessage(conn, WebMessage{Type: "status", Content: "Analyzing request...", Thinking: true})
 		slog.Info("LLM request", "history_len", len(*history), "model", s.modelName)
-		
-		var tempZero = 0.0
 
-		resp, err := util.WithRetry(ctx, func() (*llm.Message, error) {
-			return llm.Complete(ctx, s.llmClient, llm.Request{
-				Model:       s.modelName,
-				System:      systemPrompt,
-				Messages:    *history,
-				Tools:       s.tools,
-				Temperature: &tempZero,
-				MaxTokens:   4096,
-			})
+		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
+			return goai.GenerateText(ctx, s.llmModel,
+				goai.WithMessages(*history...),
+				goai.WithSystem(systemPrompt),
+				goai.WithTools(s.tools...),
+				goai.WithTemperature(0),
+				goai.WithMaxOutputTokens(4096),
+			)
 		})
 
 		if err != nil {
@@ -184,89 +167,68 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 			return
 		}
 
-		if resp == nil {
-			s.sendMessage(conn, WebMessage{Type: "error", Content: "LLM returned no message"})
-			s.sendMessage(conn, WebMessage{Type: "clear_status"})
-			return
-		}
+		// Append assistant turn to history.
+		*history = append(*history, result.ResponseMessages...)
 
-		*history = append(*history, *resp)
+		respText := result.Text
+		toolCalls := result.ToolCalls
 
-		// Detect stalling (copy logic from main.go)
-		respText := messageText(*resp)
+		// Detect stalling (model narrates instead of calling tools).
 		content := strings.ToLower(respText)
-		toolCalls := messageToolCalls(*resp)
 		if len(toolCalls) == 0 && (strings.Contains(content, "i will") ||
 			strings.Contains(content, "let me") ||
 			strings.Contains(content, "now i'll") ||
 			strings.Contains(content, "searching")) {
 
-			*history = append(*history, llm.Message{
-				Role:    llm.RoleUser,
-				Content: []llm.Block{llm.TextBlock{Text: "Please proceed with the tool call immediately. Do not narrate your intent."}},
-			})
+			*history = append(*history, goai.UserMessage("Please proceed with the tool call immediately. Do not narrate your intent."))
 			continue
 		}
 
 		if respText != "" && len(toolCalls) == 0 {
 			s.sendMessage(conn, WebMessage{Type: "assistant", Content: respText})
-
-			if s.useMemory && lastUserInput != "" {
-				_ = connMem.SaveContext(ctx,
-					map[string]any{"input": lastUserInput},
-					map[string]any{"output": respText},
-				)
-			}
 		}
 
 		if len(toolCalls) > 0 {
 			s.sendMessage(conn, WebMessage{Type: "status", Content: summarizeToolCalls(toolCalls), Thinking: true})
 
-			toolResults := []llm.Message{}
 			for i, tc := range toolCalls {
-				name := tc.Name
-				argsJSON := string(tc.Arguments)
-				if argsJSON == "" {
-					argsJSON = "{}"
+				var args map[string]any
+				if len(tc.Input) > 0 {
+					if err := json.Unmarshal(tc.Input, &args); err != nil {
+						slog.Warn("Failed to unmarshal tool arguments", "error", err, "name", tc.Name)
+						args = make(map[string]any)
+					}
 				}
 
-				var args map[string]any
-				if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-					slog.Warn("Failed to unmarshal tool arguments", "error", err, "args", argsJSON)
-					args = make(map[string]any)
-				}
 				toolEvent := &ToolEvent{
 					ID:    tc.ID,
 					Seq:   i + 1,
-					Name:  name,
+					Name:  tc.Name,
 					State: "running",
 					Args:  args,
 				}
 				s.sendMessage(conn, WebMessage{Type: "tool", Tool: toolEvent})
 
-				toolResp, err := s.mcpSession.CallTool(ctx, &mcp.CallToolParams{
-					Name:      name,
-					Arguments: args,
-				})
+				toolResp, callErr := s.mcpClient.CallTool(ctx, tc.Name, args)
 
 				resultText := ""
-				isError := false
+				isError := callErr != nil || (toolResp != nil && toolResp.IsError)
+				if callErr != nil {
+					resultText = fmt.Sprintf("error: %v", callErr)
+				} else {
+					resultText = extractToolText(toolResp)
+				}
+
 				isCached := false
 				isStored := false
-				if err != nil {
-					resultText = fmt.Sprintf("error: %v", err)
-					isError = true
-				} else {
-					resultText = extractToolContent(toolResp)
-					isError = toolResp != nil && toolResp.IsError
-					if strings.HasPrefix(resultText, "✓ ") {
-						isCached = true
-						resultText = strings.TrimPrefix(resultText, "✓ ")
-					} else if strings.HasPrefix(resultText, "↓ ") {
-						isStored = true
-						resultText = strings.TrimPrefix(resultText, "↓ ")
-					}
+				if strings.HasPrefix(resultText, "✓ ") {
+					isCached = true
+					resultText = strings.TrimPrefix(resultText, "✓ ")
+				} else if strings.HasPrefix(resultText, "↓ ") {
+					isStored = true
+					resultText = strings.TrimPrefix(resultText, "↓ ")
 				}
+
 				finalState := "completed"
 				if isError {
 					finalState = "error"
@@ -276,7 +238,7 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 					Tool: &ToolEvent{
 						ID:       tc.ID,
 						Seq:      i + 1,
-						Name:     name,
+						Name:     tc.Name,
 						State:    finalState,
 						Args:     args,
 						Result:   resultText,
@@ -286,21 +248,11 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 					},
 				})
 
-				toolResults = append(toolResults, llm.Message{
-					Role: llm.RoleTool,
-					Content: []llm.Block{llm.ToolResultBlock{
-						ToolCallID: tc.ID,
-						Content:    resultText,
-						IsError:    isError,
-					}},
-				})
+				*history = append(*history, goai.ToolMessage(tc.ID, tc.Name, resultText))
 			}
 
-			for _, res := range toolResults {
-				*history = append(*history, res)
-			}
 			s.sendMessage(conn, WebMessage{Type: "status", Content: "Tool results received. Drafting final answer...", Thinking: true})
-			continue // Loop to let LLM process tool results
+			continue
 		}
 
 		s.sendMessage(conn, WebMessage{Type: "clear_status"})
@@ -319,7 +271,6 @@ func (s *Server) sendMessage(conn *websocket.Conn, msg WebMessage) {
 	}
 }
 
-// Helper functions (copied from main.go or slightly adapted)
 const systemPrompt = `You are a silent Elastic Security analyst tool.
 YOUR ONLY JOB IS TO CALL TOOLS.
 NEVER explain what you are doing.
@@ -340,7 +291,7 @@ TOOL SELECTION GUIDE — call the right tool immediately:
 - search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
 - kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
-func summarizeToolCalls(toolCalls []llm.ToolCallBlock) string {
+func summarizeToolCalls(toolCalls []provider.ToolCall) string {
 	if len(toolCalls) == 0 {
 		return "Waiting for assistant response..."
 	}
@@ -356,38 +307,34 @@ func summarizeToolCalls(toolCalls []llm.ToolCallBlock) string {
 	return fmt.Sprintf("Running %s...", strings.Join(names, ", "))
 }
 
-func extractToolContent(toolResp *mcp.CallToolResult) string {
+func extractToolText(toolResp *goaimcp.CallToolResult) string {
 	if toolResp == nil {
 		return ""
 	}
 	var sb strings.Builder
-	for _, c := range toolResp.Content {
-		if txt, ok := c.(*mcp.TextContent); ok {
+	for _, block := range toolResp.Content {
+		if tc, ok := goaimcp.ParseTextContent(block); ok {
 			if sb.Len() > 0 {
 				sb.WriteString("\n")
 			}
-			sb.WriteString(txt.Text)
+			sb.WriteString(tc.Text)
 		}
 	}
 	return sb.String()
 }
 
-func messageText(msg llm.Message) string {
+func renderHistoryText(history []provider.Message) string {
 	var sb strings.Builder
-	for _, block := range msg.Content {
-		if tb, ok := block.(llm.TextBlock); ok {
-			sb.WriteString(tb.Text)
+	for _, msg := range history {
+		for _, p := range msg.Content {
+			if p.Type == provider.PartText && p.Text != "" {
+				role := "Human"
+				if msg.Role == provider.RoleAssistant {
+					role = "AI"
+				}
+				sb.WriteString(fmt.Sprintf("%s: %s\n", role, p.Text))
+			}
 		}
 	}
 	return sb.String()
-}
-
-func messageToolCalls(msg llm.Message) []llm.ToolCallBlock {
-	var calls []llm.ToolCallBlock
-	for _, block := range msg.Content {
-		if tc, ok := block.(llm.ToolCallBlock); ok {
-			calls = append(calls, tc)
-		}
-	}
-	return calls
 }

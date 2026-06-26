@@ -3,7 +3,6 @@ module github.com/mfranz/elastic-security-mcp
 go 1.26.2
 
 require (
-	github.com/amit-timalsina/pi-llm-go v0.0.0-00010101000000-000000000000
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
@@ -13,6 +12,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/spf13/cobra v1.10.2
+	github.com/zendev-sh/goai v0.8.5
 )
 
 require (
@@ -62,10 +62,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/term v0.38.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 )
-
-replace github.com/amit-timalsina/pi-llm-go => /home/mdfranz/github/pi-llm-go

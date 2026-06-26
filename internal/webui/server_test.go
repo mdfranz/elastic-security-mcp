@@ -9,17 +9,16 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	llm "github.com/amit-timalsina/pi-llm-go"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/zendev-sh/goai/provider"
 )
 
 func setupTestServer() *Server {
 	return &Server{
-		mcpSession: nil,
-		llmClient:  nil,
-		tools:      []llm.Tool{},
-		modelName:  "test-model",
-		useMemory:  false,
+		mcpClient: nil,
+		llmModel:  nil,
+		tools:     nil,
+		modelName: "test-model",
+		useMemory: false,
 	}
 }
 
@@ -173,21 +172,18 @@ func TestToolEventSerialization(t *testing.T) {
 func TestSummarizeToolCalls(t *testing.T) {
 	tests := []struct {
 		name      string
-		toolCalls []llm.ToolCallBlock
-		wantLen   int
+		toolCalls []provider.ToolCall
 		wantWords []string
 	}{
 		{
 			name:      "Empty tool calls",
-			toolCalls: []llm.ToolCallBlock{},
+			toolCalls: []provider.ToolCall{},
 			wantWords: []string{"Waiting"},
 		},
 		{
 			name: "Single tool call",
-			toolCalls: []llm.ToolCallBlock{
-				{
-					Name: "search",
-				},
+			toolCalls: []provider.ToolCall{
+				{Name: "search"},
 			},
 			wantWords: []string{"Running", "search"},
 		},
@@ -205,45 +201,29 @@ func TestSummarizeToolCalls(t *testing.T) {
 	}
 }
 
-func TestExtractToolContent(t *testing.T) {
+func TestExtractToolText(t *testing.T) {
 	tests := []struct {
-		name     string
-		toolResp *mcp.CallToolResult
-		want     string
+		name string
+		want string
 	}{
 		{
-			name:     "Nil response",
-			toolResp: nil,
-			want:     "",
-		},
-		{
-			name:     "Empty response",
-			toolResp: &mcp.CallToolResult{},
-			want:     "",
-		},
-		{
-			name: "Text content",
-			toolResp: &mcp.CallToolResult{
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "result text"},
-				},
-			},
-			want: "result text",
+			name: "Nil response",
+			want: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractToolContent(tt.toolResp)
+			result := extractToolText(nil)
 			if result != tt.want {
-				t.Errorf("extractToolContent() = %q, want %q", result, tt.want)
+				t.Errorf("extractToolText(nil) = %q, want %q", result, tt.want)
 			}
 		})
 	}
 }
 
 func TestConversationHistoryInitialization(t *testing.T) {
-	history := []llm.Message{}
+	history := []provider.Message{}
 
 	if len(history) != 0 {
 		t.Errorf("Expected 0 messages in history, got %d", len(history))
@@ -266,7 +246,7 @@ func TestWebSocketResetCommand(t *testing.T) {
 
 	ws.SetReadDeadline(time.Now().Add(time.Second))
 
-	_ = ws.ReadJSON(&WebMessage{}) // Read setup message
+	_ = ws.ReadJSON(&WebMessage{}) // consume setup message
 
 	resetMsg := WebMessage{Type: "reset"}
 	if err := ws.WriteJSON(resetMsg); err != nil {

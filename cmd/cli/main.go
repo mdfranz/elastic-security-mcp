@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -21,14 +20,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	llm "github.com/amit-timalsina/pi-llm-go"
-	"github.com/amit-timalsina/pi-llm-go/providers/anthropic"
-	"github.com/amit-timalsina/pi-llm-go/providers/gemini"
-	"github.com/amit-timalsina/pi-llm-go/providers/openai"
-	internalLlm "github.com/mfranz/elastic-security-mcp/internal/llm"
+	goai "github.com/zendev-sh/goai"
+	goaimcp "github.com/zendev-sh/goai/mcp"
+	"github.com/zendev-sh/goai/provider"
+	"github.com/zendev-sh/goai/provider/anthropic"
+	"github.com/zendev-sh/goai/provider/google"
+	"github.com/zendev-sh/goai/provider/openai"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/mfranz/elastic-security-mcp/internal/webui"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 )
 
@@ -110,13 +109,13 @@ var (
 // Messages
 type generateMsg struct{}
 type llmResponseMsg struct {
-	resp *llm.Message
+	result *goai.TextResult
 }
 type executeToolsMsg struct {
-	toolCalls []llm.ToolCallBlock
+	toolCalls []provider.ToolCall
 }
 type toolsResultMsg struct {
-	results  []llm.Message
+	results  []provider.Message
 	outcomes []toolOutcome
 }
 type errMsg struct {
@@ -142,14 +141,13 @@ const (
 )
 
 type model struct {
-	ctx        context.Context
-	mcpSession *mcp.ClientSession
-	llmClient  llm.LLM
-	tools      []llm.Tool
-	history    []llm.Message
-	modelName  string
-	mem        *internalLlm.ConversationBuffer
-	useMemory  bool
+	ctx       context.Context
+	mcpClient *goaimcp.Client
+	llmModel  provider.LanguageModel
+	tools     []goai.Tool
+	history   []provider.Message
+	modelName string
+	useMemory bool
 	lastInput  string
 	inputHist  []string
 	histIndex  int
@@ -175,7 +173,7 @@ type model struct {
 	ready        bool
 }
 
-func initialModel(ctx context.Context, session *mcp.ClientSession, client llm.LLM, tools []llm.Tool, modelName string, useMemory bool) model {
+func initialModel(ctx context.Context, mcpClient *goaimcp.Client, llmModel provider.LanguageModel, tools []goai.Tool, modelName string, useMemory bool) model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask about security data..."
 	ti.Focus()
@@ -198,22 +196,21 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client llm.LL
 	)
 
 	return model{
-		ctx:        ctx,
-		mcpSession: session,
-		llmClient:  client,
-		tools:      tools,
-		modelName:  modelName,
-		mem:        internalLlm.NewConversationBuffer(),
-		useMemory:  useMemory,
-		inputHist:  loadHistory(),
-		histIndex:  -1,
-		textInput:  ti,
-		spinner:    s,
-		renderer:   renderer,
-		isDark:     isDark,
-		focus:      focusInput,
-		history:    []llm.Message{},
-		messages:   []string{},
+		ctx:       ctx,
+		mcpClient: mcpClient,
+		llmModel:  llmModel,
+		tools:     tools,
+		modelName: modelName,
+		useMemory: useMemory,
+		inputHist: loadHistory(),
+		histIndex: -1,
+		textInput: ti,
+		spinner:   s,
+		renderer:  renderer,
+		isDark:    isDark,
+		focus:     focusInput,
+		history:   []provider.Message{},
+		messages:  []string{},
 	}
 }
 
@@ -372,18 +369,16 @@ func (m model) renderFooterMetaLine(width int) string {
 	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }
 
-func summarizeToolCalls(toolCalls []llm.ToolCallBlock) string {
+func summarizeToolCalls(toolCalls []provider.ToolCall) string {
 	if len(toolCalls) == 0 {
 		return "Waiting for assistant response..."
 	}
 
 	names := make([]string, 0, len(toolCalls))
 	for _, tc := range toolCalls {
-		name := toolCallName(tc)
-		if name == "(missing)" {
-			continue
+		if tc.Name != "" {
+			names = append(names, tc.Name)
 		}
-		names = append(names, name)
 	}
 
 	switch len(names) {
@@ -515,18 +510,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, systemStyle.Render(msg))
 					m.appendConversation("system", msg)
 				} else {
-					vars, err := m.mem.LoadMemoryVariables(m.ctx, nil)
-					if err != nil {
-						m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Memory error: %v", err)))
-					} else {
-						hist, _ := vars["history"].(string)
-						if hist == "" {
-							hist = "(empty)"
-						}
-						msg := fmt.Sprintf("Conversation Memory:\n%s", hist)
-						m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Conversation Memory:"), hist))
-						m.appendConversation("system", msg)
+					hist := renderHistoryText(m.history)
+					if hist == "" {
+						hist = "(empty)"
 					}
+					msg := fmt.Sprintf("Conversation Memory:\n%s", hist)
+					m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Conversation Memory:"), hist))
+					m.appendConversation("system", msg)
 				}
 				m.refreshViewport(true)
 				return m, nil
@@ -547,10 +537,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, fmt.Sprintf("%s %s", userStyle.Render("You:"), wrappedUser))
 			m.appendConversation("user", input)
 
-			m.history = append(m.history, llm.Message{
-				Role:    llm.RoleUser,
-				Content: []llm.Block{llm.TextBlock{Text: input}},
-			})
+			m.history = append(m.history, goai.UserMessage(input))
 
 			if !m.useMemory {
 				m.pruneHistory()
@@ -592,8 +579,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spCmd
 
 	case llmResponseMsg:
-		if msg.resp == nil {
-			m.err = errors.New("LLM returned no message")
+		if msg.result == nil {
+			m.err = errors.New("LLM returned no response")
 			m.isThinking = false
 			m.statusText = ""
 			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
@@ -601,27 +588,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		resp := msg.resp
+		result := msg.result
 
-		m.history = append(m.history, *resp)
+		// Append assistant turn to history.
+		m.history = append(m.history, result.ResponseMessages...)
 
-		// Detect stalling
-		respText := messageText(*resp)
+		respText := result.Text
+		toolCalls := result.ToolCalls
+
+		// Detect stalling (model narrates instead of calling tools).
 		content := strings.ToLower(respText)
-		toolCalls := messageToolCalls(*resp)
 		if len(toolCalls) == 0 && (strings.Contains(content, "i will") ||
 			strings.Contains(content, "let me") ||
 			strings.Contains(content, "now i'll") ||
 			strings.Contains(content, "searching")) {
 
-			m.history = append(m.history, llm.Message{
-				Role:    llm.RoleUser,
-				Content: []llm.Block{llm.TextBlock{Text: "Please proceed with the tool call immediately. Do not narrate your intent."}},
-			})
+			m.history = append(m.history, goai.UserMessage("Please proceed with the tool call immediately. Do not narrate your intent."))
 			return m, m.generateResponse()
 		}
 
-		// Display content if any
+		// Display text content.
 		if respText != "" && len(toolCalls) == 0 {
 			rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(respText))
 			if err != nil {
@@ -631,11 +617,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendConversation("assistant", respText)
 		}
 
-		// Handle tool calls
+		// Handle tool calls.
 		if len(toolCalls) > 0 {
 			m.statusText = summarizeToolCalls(toolCalls) + " Tool lines above are intermediate."
 			for _, tc := range toolCalls {
-				header := toolStyle.Render(fmt.Sprintf("[%s] args:", toolCallName(tc)))
+				header := toolStyle.Render(fmt.Sprintf("[%s] args:", tc.Name))
 				body := toolJSONStyle.Copy().Width(m.viewport.Width).Render(formatToolCallArguments(tc))
 				m.messages = append(m.messages, header+"\n"+body+"\n")
 			}
@@ -643,16 +629,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.executeTools(toolCalls)
 		}
 
-		// Done — save completed turn to memory
-		if m.lastInput != "" {
-			if m.useMemory {
-				_ = m.mem.SaveContext(m.ctx,
-					map[string]any{"input": m.lastInput},
-					map[string]any{"output": respText},
-				)
-			}
-			m.lastInput = ""
-		}
+		m.lastInput = ""
 		m.isThinking = false
 		m.statusText = ""
 		m.refreshViewport(false)
@@ -730,36 +707,17 @@ func (m model) View() string {
 	return s
 }
 
-func toolCallName(tc llm.ToolCallBlock) string {
-	if tc.Name == "" {
-		return "(missing)"
-	}
-	return tc.Name
-}
-
-func toolCallArguments(tc llm.ToolCallBlock) string {
-	if len(tc.Arguments) == 0 {
+func formatToolCallArguments(tc provider.ToolCall) string {
+	if len(tc.Input) == 0 {
 		return "{}"
-	}
-	s := string(tc.Arguments)
-	if strings.TrimSpace(s) == "" {
-		return "{}"
-	}
-	return s
-}
-
-func formatToolCallArguments(tc llm.ToolCallBlock) string {
-	raw := toolCallArguments(tc)
-	if raw == "{}" {
-		return raw
 	}
 
 	var parsed map[string]any
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return raw
+	if err := json.Unmarshal(tc.Input, &parsed); err != nil {
+		return string(tc.Input)
 	}
 
-	// Try to expand any inner JSON strings (e.g. for search_elastic query)
+	// Expand inner JSON strings (e.g. for search_elastic query field).
 	for k, v := range parsed {
 		if s, ok := v.(string); ok {
 			s = strings.TrimSpace(s)
@@ -775,7 +733,7 @@ func formatToolCallArguments(tc llm.ToolCallBlock) string {
 
 	formatted, err := json.MarshalIndent(parsed, "", " ")
 	if err != nil {
-		return raw
+		return string(tc.Input)
 	}
 
 	lines := strings.Split(string(formatted), "\n")
@@ -788,35 +746,24 @@ func formatToolCallArguments(tc llm.ToolCallBlock) string {
 		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 
-		// If this line is just a closing brace/bracket, append it to the previous line
 		if (trimmed == "}" || trimmed == "}," || trimmed == "]" || trimmed == "],") && len(result) > 0 {
 			result[len(result)-1] += " " + trimmed
 			continue
 		}
-
-		// Look ahead: if the next line is a closing brace/bracket, pull it up now
-		// Or if this line ends with { or [ and the next line is content, we can potentially join,
-		// but the user specifically wanted the braces themselves to not have their own lines.
-
-		// If current line ends with { or [ and is not the last line
 		if (strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "[")) && i+1 < len(lines) {
 			nextLine := strings.TrimSpace(lines[i+1])
-			// If next line is a closing one, join them: "key": {}
 			if nextLine == "}" || nextLine == "}," || nextLine == "]" || nextLine == "]," {
 				result = append(result, line+" "+nextLine)
-				i++ // skip next
+				i++
 				continue
 			}
-			// Otherwise, join the next line to this one to start the content immediately
 			result = append(result, line+" "+nextLine)
-			i++ // skip next line as it's now part of this one
+			i++
 			continue
 		}
-
 		result = append(result, line)
 	}
 
-	// Final pass to catch any remaining standalone closures that might have been shifted
 	var final []string
 	for _, line := range result {
 		trimmed := strings.TrimSpace(line)
@@ -830,77 +777,73 @@ func formatToolCallArguments(tc llm.ToolCallBlock) string {
 	return strings.Join(final, "\n")
 }
 
-func messageText(msg llm.Message) string {
-	var sb strings.Builder
-	for _, block := range msg.Content {
-		if tb, ok := block.(llm.TextBlock); ok {
-			sb.WriteString(tb.Text)
-		}
-	}
-	return sb.String()
-}
-
-func messageToolCalls(msg llm.Message) []llm.ToolCallBlock {
-	var calls []llm.ToolCallBlock
-	for _, block := range msg.Content {
-		if tc, ok := block.(llm.ToolCallBlock); ok {
-			calls = append(calls, tc)
-		}
-	}
-	return calls
-}
-
-func extractToolContent(toolResp *mcp.CallToolResult) string {
+func extractToolText(toolResp *goaimcp.CallToolResult) string {
 	if toolResp == nil {
 		return ""
 	}
 	var sb strings.Builder
-	for _, c := range toolResp.Content {
-		if txt, ok := c.(*mcp.TextContent); ok {
+	for _, block := range toolResp.Content {
+		if tc, ok := goaimcp.ParseTextContent(block); ok {
 			if sb.Len() > 0 {
 				sb.WriteString("\n")
 			}
-			sb.WriteString(txt.Text)
+			sb.WriteString(tc.Text)
 		}
 	}
 	return sb.String()
 }
 
-func summarizeHistoryForLog(history []llm.Message) string {
+func renderHistoryText(history []provider.Message) string {
+	var sb strings.Builder
+	for _, msg := range history {
+		for _, p := range msg.Content {
+			if p.Type == provider.PartText && p.Text != "" {
+				role := "Human"
+				if msg.Role == provider.RoleAssistant {
+					role = "AI"
+				}
+				sb.WriteString(fmt.Sprintf("%s: %s\n", role, p.Text))
+			}
+		}
+	}
+	return sb.String()
+}
+
+func summarizeHistoryForLog(history []provider.Message) string {
 	type partSummary map[string]any
 	type messageSummary map[string]any
 
 	summary := make([]messageSummary, 0, len(history))
 	for i, msg := range history {
 		var parts []partSummary
-		for _, block := range msg.Content {
-			switch b := block.(type) {
-			case llm.TextBlock:
+		for _, p := range msg.Content {
+			switch p.Type {
+			case provider.PartText:
 				parts = append(parts, partSummary{
 					"type":    "text",
-					"chars":   len(b.Text),
-					"preview": util.TruncateForLog(b.Text, 160),
+					"chars":   len(p.Text),
+					"preview": util.TruncateForLog(p.Text, 160),
 				})
-			case llm.ToolCallBlock:
+			case provider.PartToolCall:
 				parts = append(parts, partSummary{
 					"type":      "tool_call",
-					"name":      b.Name,
-					"id":        b.ID,
-					"arg_chars": len(b.Arguments),
-					"args":      util.TruncateForLog(string(b.Arguments), 240),
+					"name":      p.ToolName,
+					"id":        p.ToolCallID,
+					"arg_chars": len(p.ToolInput),
+					"args":      util.TruncateForLog(string(p.ToolInput), 240),
 				})
-			case llm.ToolResultBlock:
+			case provider.PartToolResult:
 				parts = append(parts, partSummary{
-					"type":         "tool_response",
-					"tool_call_id": b.ToolCallID,
-					"chars":        len(b.Content),
-					"preview":      util.TruncateForLog(b.Content, 240),
+					"type":         "tool_result",
+					"tool_call_id": p.ToolCallID,
+					"chars":        len(p.ToolOutput),
+					"preview":      util.TruncateForLog(p.ToolOutput, 240),
 				})
 			}
 		}
 		summary = append(summary, messageSummary{
 			"index": i,
-			"role":  msg.Role,
+			"role":  string(msg.Role),
 			"parts": parts,
 		})
 	}
@@ -919,94 +862,63 @@ func (m model) generateResponse() tea.Cmd {
 			"message_count", len(m.history),
 			"summary", summarizeHistoryForLog(m.history),
 		)
-		if util.ClientPayloadLoggingEnabled() {
-			histJSON, err := json.Marshal(m.history)
-			if err == nil {
-				slog.Debug("Sending history to LLM", "history", util.TruncateForLog(string(histJSON), maxLoggedPayloadChars))
-			}
-			toolsJSON, err := json.Marshal(m.tools)
-			if err == nil {
-				slog.Debug("Sending tools to LLM", "tools", util.TruncateForLog(string(toolsJSON), maxLoggedPayloadChars))
-			}
-		}
 
-		var tempZero = 0.0
-
-		resp, err := util.WithRetry(m.ctx, func() (*llm.Message, error) {
-			return llm.Complete(m.ctx, m.llmClient, llm.Request{
-				Model:       m.modelName,
-				System:      systemPrompt,
-				Messages:    m.history,
-				Tools:       m.tools,
-				Temperature: &tempZero,
-				MaxTokens:   4096,
-			})
+		result, err := util.WithRetry(m.ctx, func() (*goai.TextResult, error) {
+			return goai.GenerateText(m.ctx, m.llmModel,
+				goai.WithMessages(m.history...),
+				goai.WithSystem(systemPrompt),
+				goai.WithTools(m.tools...),
+				goai.WithTemperature(0),
+				goai.WithMaxOutputTokens(4096),
+			)
 		})
 		if err != nil {
 			slog.Error("LLM generation error", "error", err)
 			return errMsg{err}
 		}
 
-		if util.ClientPayloadLoggingEnabled() {
-			respJSON, err := json.Marshal(resp)
-			if err == nil {
-				slog.Debug("Received LLM response", "response", util.TruncateForLog(string(respJSON), maxLoggedPayloadChars))
-			}
-		}
-
-		return llmResponseMsg{resp}
+		return llmResponseMsg{result}
 	}
 }
 
-func (m model) executeTools(toolCalls []llm.ToolCallBlock) tea.Cmd {
+func (m model) executeTools(toolCalls []provider.ToolCall) tea.Cmd {
 	return func() tea.Msg {
-		toolResultMessages := []llm.Message{}
+		toolResultMessages := []provider.Message{}
 		outcomes := make([]toolOutcome, 0, len(toolCalls))
+
 		for _, tc := range toolCalls {
-			name := toolCallName(tc)
-			argsJSON := toolCallArguments(tc)
-			slog.Info("Executing tool", "name", name, "arg_chars", len(argsJSON), "id", tc.ID)
+			slog.Info("Executing tool", "name", tc.Name, "arg_chars", len(tc.Input), "id", tc.ID)
 			if util.ClientPayloadLoggingEnabled() {
-				slog.Debug("Tool arguments", "name", name, "args", util.TruncateForLog(argsJSON, maxLoggedPayloadChars))
+				slog.Debug("Tool arguments", "name", tc.Name, "args", util.TruncateForLog(string(tc.Input), maxLoggedPayloadChars))
 			}
 
 			if tc.Name == "" {
-				toolResultMessages = append(toolResultMessages, llm.Message{
-					Role: llm.RoleTool,
-					Content: []llm.Block{llm.ToolResultBlock{
-						ToolCallID: tc.ID,
-						Content:    "invalid tool call: missing function name",
-						IsError:    true,
-					}},
-				})
+				toolResultMessages = append(toolResultMessages,
+					goai.ToolMessage(tc.ID, tc.Name, "invalid tool call: missing function name"))
+				outcomes = append(outcomes, toolOutcome{isError: true})
 				continue
 			}
 
 			var args map[string]any
-			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-				toolResultMessages = append(toolResultMessages, llm.Message{
-					Role: llm.RoleTool,
-					Content: []llm.Block{llm.ToolResultBlock{
-						ToolCallID: tc.ID,
-						Content:    fmt.Sprintf("invalid tool arguments: %v", err),
-						IsError:    true,
-					}},
-				})
-				continue
+			if len(tc.Input) > 0 {
+				if err := json.Unmarshal(tc.Input, &args); err != nil {
+					toolResultMessages = append(toolResultMessages,
+						goai.ToolMessage(tc.ID, tc.Name, fmt.Sprintf("invalid tool arguments: %v", err)))
+					outcomes = append(outcomes, toolOutcome{isError: true})
+					continue
+				}
 			}
 
-			toolResp, err := m.mcpSession.CallTool(m.ctx, &mcp.CallToolParams{
-				Name:      tc.Name,
-				Arguments: args,
-			})
+			toolResp, err := m.mcpClient.CallTool(m.ctx, tc.Name, args)
 
 			var resultText string
+			isError := err != nil || (toolResp != nil && toolResp.IsError)
 			switch {
 			case err != nil:
 				slog.Error("Tool call error", "name", tc.Name, "error", err)
 				resultText = fmt.Sprintf("error calling tool: %v", err)
-			case toolResp.IsError:
-				resultText = extractToolContent(toolResp)
+			case toolResp != nil && toolResp.IsError:
+				resultText = extractToolText(toolResp)
 				if strings.TrimSpace(resultText) == "" {
 					resultText = "tool returned an error"
 				}
@@ -1015,29 +927,24 @@ func (m model) executeTools(toolCalls []llm.ToolCallBlock) tea.Cmd {
 					"error_preview", util.TruncateForLog(resultText, 500),
 				)
 			default:
-				resultText = extractToolContent(toolResp)
+				resultText = extractToolText(toolResp)
 				slog.Debug("Tool execution successful",
 					"name", tc.Name,
 					"result_len", len(resultText),
 					"result_preview", util.TruncateForLog(resultText, 500),
 				)
 			}
+
 			resultText, isCached, isStored := normalizeToolResultText(resultText)
 			outcomes = append(outcomes, toolOutcome{
 				isCached: isCached,
 				isStored: isStored,
-				isError:  err != nil || (toolResp != nil && toolResp.IsError),
+				isError:  isError,
 			})
 
-			toolResultMessages = append(toolResultMessages, llm.Message{
-				Role: llm.RoleTool,
-				Content: []llm.Block{llm.ToolResultBlock{
-					ToolCallID: tc.ID,
-					Content:    resultText,
-					IsError:    err != nil || (toolResp != nil && toolResp.IsError),
-				}},
-			})
+			toolResultMessages = append(toolResultMessages, goai.ToolMessage(tc.ID, tc.Name, resultText))
 		}
+
 		return toolsResultMsg{results: toolResultMessages, outcomes: outcomes}
 	}
 }
@@ -1186,7 +1093,6 @@ func main() {
 }
 
 func runSinglePrompt(modelFlag string, prompt string) {
-	// 1. Logging Setup (keep slog for background details)
 	logFile := util.ClientLogFile()
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -1198,183 +1104,123 @@ func runSinglePrompt(modelFlag string, prompt string) {
 	slog.SetDefault(logger)
 	defer f.Close()
 
-	// Minimal setup for single prompt
 	ctx := context.Background()
 
-	// Server path
 	serverPath := os.Getenv("ELASTIC_MCP_SERVER")
 	if serverPath == "" {
 		serverPath = "./elastic-mcp-server"
 	}
 
-	// LLM Setup
 	modelName := modelFlag
 	if modelName == "" {
 		modelName = os.Getenv("ELASTIC_MODEL")
 	}
 	if modelName == "" {
-		// Default to gemini-2.0-flash if nothing specified
 		modelName = "gemini-2.0-flash"
 	}
-
-	var llmClient llm.LLM
 
 	openaiKey := os.Getenv("OPENAI_API_KEY")
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	geminiKey := os.Getenv("GEMINI_API_KEY")
 
+	var llmModel provider.LanguageModel
 	switch modelProvider(modelName) {
 	case "openai":
 		if openaiKey == "" {
 			fmt.Fprintln(os.Stderr, "OPENAI_API_KEY is required for openai models")
 			os.Exit(1)
 		}
-		llmClient, err = openai.New(openai.Options{APIKey: openaiKey})
+		llmModel = openai.Chat(modelName)
 	case "anthropic":
 		if anthropicKey == "" {
 			fmt.Fprintln(os.Stderr, "ANTHROPIC_API_KEY is required for anthropic models")
 			os.Exit(1)
 		}
-		llmClient, err = anthropic.New(anthropic.Options{APIKey: anthropicKey})
+		llmModel = anthropic.Chat(modelName)
 	case "gemini":
 		if geminiKey == "" {
 			fmt.Fprintln(os.Stderr, "GEMINI_API_KEY is required for gemini models")
 			os.Exit(1)
 		}
-		llmClient, err = gemini.New(gemini.Options{APIKey: geminiKey})
+		llmModel = google.Chat(modelName)
 	default:
 		fmt.Fprintf(os.Stderr, "Unsupported model prefix: %s\n", modelName)
 		os.Exit(1)
 	}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create LLM client: %v\n", err)
-		os.Exit(1)
-	}
-
-	// MCP Setup
-	cmd := exec.Command(serverPath)
-	transport := &mcp.CommandTransport{Command: cmd}
-	client := mcp.NewClient(&mcp.Implementation{Name: "elastic-cli-oneshot", Version: "1.0.0"}, nil)
-
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
+	oneshotTransport := &goaimcp.StdioTransport{Command: serverPath}
+	mcpClient := goaimcp.NewClient("elastic-cli-oneshot", "1.0.0",
+		goaimcp.WithTransport(oneshotTransport),
+	)
+	oneshotTransport.OnClose(func() { mcpClient.Close() })
+	if err := mcpClient.Connect(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect to MCP server: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer mcpClient.Close()
 
-	toolsResult, err := session.ListTools(ctx, nil)
+	toolsResult, err := mcpClient.ListTools(ctx, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to list tools: %v\n", err)
 		os.Exit(1)
 	}
 
-	tools := make([]llm.Tool, 0, len(toolsResult.Tools))
+	tools := make([]goai.Tool, 0, len(toolsResult.Tools))
 	toolNames := make([]string, 0, len(toolsResult.Tools))
 	for _, t := range toolsResult.Tools {
 		toolNames = append(toolNames, t.Name)
-		schemaBytes := convertSchema(t.InputSchema)
-		tools = append(tools, llm.Tool{
+		tools = append(tools, goai.Tool{
 			Name:        t.Name,
 			Description: t.Description,
-			InputSchema: schemaBytes,
+			InputSchema: t.InputSchema,
 		})
 	}
 	slog.Info("Discovered tools", "count", len(tools), "names", toolNames)
 
-	history := []llm.Message{
-		{
-			Role:    llm.RoleUser,
-			Content: []llm.Block{llm.TextBlock{Text: prompt}},
-		},
-	}
+	history := []provider.Message{goai.UserMessage(prompt)}
 
 	for {
-		resp, err := util.WithRetry(ctx, func() (*llm.Message, error) {
-			return llm.Complete(ctx, llmClient, llm.Request{
-				Model:    modelName,
-				System:   systemPrompt,
-				Messages: history,
-				Tools:    tools,
-			})
+		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
+			return goai.GenerateText(ctx, llmModel,
+				goai.WithMessages(history...),
+				goai.WithSystem(systemPrompt),
+				goai.WithTools(tools...),
+			)
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
 			os.Exit(1)
 		}
-		if resp == nil {
-			fmt.Fprintln(os.Stderr, "Generation error: LLM returned no message")
-			os.Exit(1)
+
+		history = append(history, result.ResponseMessages...)
+
+		if result.Text != "" {
+			fmt.Println(result.Text)
 		}
 
-		respText := messageText(*resp)
-		if respText != "" {
-			fmt.Println(respText)
-		}
-
-		toolCalls := messageToolCalls(*resp)
-		if len(toolCalls) == 0 {
+		if len(result.ToolCalls) == 0 {
 			break
 		}
 
-		for _, tc := range toolCalls {
-			fmt.Printf("Calling tool: %s\n", toolCallName(tc))
-		}
-
-		history = append(history, *resp)
-
-		toolResults := []llm.Message{}
-		for _, tc := range toolCalls {
-			if tc.Name == "" {
-				toolResults = append(toolResults, llm.Message{
-					Role: llm.RoleTool,
-					Content: []llm.Block{llm.ToolResultBlock{
-						ToolCallID: tc.ID,
-						Content:    "invalid tool call: missing function name",
-						IsError:    true,
-					}},
-				})
-				continue
-			}
+		for _, tc := range result.ToolCalls {
+			fmt.Printf("Calling tool: %s\n", tc.Name)
 
 			var args map[string]any
-			if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-				toolResults = append(toolResults, llm.Message{
-					Role: llm.RoleTool,
-					Content: []llm.Block{llm.ToolResultBlock{
-						ToolCallID: tc.ID,
-						Content:    fmt.Sprintf("invalid tool arguments: %v", err),
-						IsError:    true,
-					}},
-				})
-				continue
+			if len(tc.Input) > 0 {
+				if err := json.Unmarshal(tc.Input, &args); err != nil {
+					history = append(history, goai.ToolMessage(tc.ID, tc.Name, fmt.Sprintf("invalid arguments: %v", err)))
+					continue
+				}
 			}
 
-			toolResp, err := session.CallTool(ctx, &mcp.CallToolParams{
-				Name:      tc.Name,
-				Arguments: args,
-			})
-
+			toolResp, err := mcpClient.CallTool(ctx, tc.Name, args)
 			resultText := ""
-			isError := err != nil || (toolResp != nil && toolResp.IsError)
 			if err != nil {
 				resultText = fmt.Sprintf("error: %v", err)
 			} else {
-				resultText = extractToolContent(toolResp)
+				resultText = extractToolText(toolResp)
 			}
-			toolResults = append(toolResults, llm.Message{
-				Role: llm.RoleTool,
-				Content: []llm.Block{llm.ToolResultBlock{
-					ToolCallID: tc.ID,
-					Content:    resultText,
-					IsError:    isError,
-				}},
-			})
-		}
-
-		for _, res := range toolResults {
-			history = append(history, res)
+			history = append(history, goai.ToolMessage(tc.ID, tc.Name, resultText))
 		}
 	}
 }
@@ -1383,21 +1229,21 @@ func runWebUI(modelFlag string, memoryFlag bool, port int) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	session, llmClient, lcTools, modelName, err := setupApp(ctx, modelFlag)
+	mcpClient, llmModel, tools, modelName, err := setupApp(ctx, modelFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer mcpClient.Close()
 
 	fmt.Printf("Web UI starting at http://localhost:%d\n", port)
-	if err := webui.RunServer(ctx, session, llmClient, lcTools, modelName, port, memoryFlag); err != nil {
+	if err := webui.RunServer(ctx, mcpClient, llmModel, tools, modelName, port, memoryFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Web UI error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llm.LLM, []llm.Tool, string, error) {
+func setupApp(ctx context.Context, modelFlag string) (*goaimcp.Client, provider.LanguageModel, []goai.Tool, string, error) {
 	// 1. Logging Setup (keep slog for background details)
 	logFile := util.ClientLogFile()
 
@@ -1417,7 +1263,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llm.LL
 
 	// LLM Setup
 	var modelName string
-	var llmClient llm.LLM
+	var llmModel provider.LanguageModel
 
 	elasticModel := modelFlag
 	if elasticModel == "" {
@@ -1523,70 +1369,66 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llm.LL
 		if openaiKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("OPENAI_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = openai.New(openai.Options{APIKey: openaiKey})
+		llmModel = openai.Chat(modelName)
 	case "anthropic":
 		if anthropicKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("ANTHROPIC_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = anthropic.New(anthropic.Options{APIKey: anthropicKey})
+		llmModel = anthropic.Chat(modelName)
 	case "gemini":
 		if geminiKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("GEMINI_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = gemini.New(gemini.Options{APIKey: geminiKey})
+		llmModel = google.Chat(modelName)
 	default:
 		return nil, nil, nil, "", fmt.Errorf("unsupported model prefix: %s", modelName)
 	}
 
-	if err != nil {
-		return nil, nil, nil, "", fmt.Errorf("failed to create LLM client: %w", err)
-	}
-
-	// MCP Setup
-	cmd := exec.Command(serverPath)
-	transport := &mcp.CommandTransport{Command: cmd}
-	client := mcp.NewClient(&mcp.Implementation{Name: "elastic-cli", Version: "1.0.0"}, nil)
-
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
+	// MCP Setup — register OnClose before Connect so the client cancels pending
+	// requests immediately when the server subprocess exits unexpectedly.
+	transport := &goaimcp.StdioTransport{Command: serverPath}
+	mcpClient := goaimcp.NewClient("elastic-cli", "1.0.0",
+		goaimcp.WithTransport(transport),
+	)
+	transport.OnClose(func() { mcpClient.Close() })
+	if err := mcpClient.Connect(ctx); err != nil {
 		return nil, nil, nil, "", fmt.Errorf("failed to connect to MCP server at %s: %w", serverPath, err)
 	}
 
-	toolsResult, err := session.ListTools(ctx, nil)
+	toolsResult, err := mcpClient.ListTools(ctx, nil)
 	if err != nil {
-		session.Close()
+		mcpClient.Close()
 		return nil, nil, nil, "", fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	tools := make([]llm.Tool, 0, len(toolsResult.Tools))
+	tools := make([]goai.Tool, 0, len(toolsResult.Tools))
 	toolNames := make([]string, 0, len(toolsResult.Tools))
 	for _, t := range toolsResult.Tools {
 		toolNames = append(toolNames, t.Name)
-		schemaBytes := convertSchema(t.InputSchema)
-		tools = append(tools, llm.Tool{
+		tools = append(tools, goai.Tool{
 			Name:        t.Name,
 			Description: t.Description,
-			InputSchema: schemaBytes,
+			InputSchema: t.InputSchema,
 		})
 	}
 	slog.Info("Discovered tools", "count", len(tools), "names", toolNames)
 
-	return session, llmClient, tools, modelName, nil
+	return mcpClient, llmModel, tools, modelName, nil
 }
 
 func runApp(modelFlag string, memoryFlag bool) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	session, llmClient, tools, modelName, err := setupApp(ctx, modelFlag)
+	mcpClient, llmModel, tools, modelName, err := setupApp(ctx, modelFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer mcpClient.Close()
 
 	// Run Bubble Tea
-	p := tea.NewProgram(initialModel(ctx, session, llmClient, tools, modelName, memoryFlag), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(ctx, mcpClient, llmModel, tools, modelName, memoryFlag), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
@@ -1626,49 +1468,3 @@ func saveHistory(input string) {
 	}
 }
 
-func cleanSchema(m map[string]any) {
-	delete(m, "additionalProperties")
-	for _, v := range m {
-		if subMap, ok := v.(map[string]any); ok {
-			cleanSchema(subMap)
-		} else if slice, ok := v.([]any); ok {
-			for _, item := range slice {
-				if subMap, ok := item.(map[string]any); ok {
-					cleanSchema(subMap)
-				}
-			}
-		}
-	}
-}
-
-func convertSchema(schema any) json.RawMessage {
-	if schema == nil {
-		return nil
-	}
-	var res map[string]any
-	if m, ok := schema.(map[string]any); ok {
-		res = make(map[string]any, len(m))
-		for k, v := range m {
-			res[k] = v
-		}
-	} else {
-		b, err := json.Marshal(schema)
-		if err != nil {
-			return nil
-		}
-		if err := json.Unmarshal(b, &res); err != nil {
-			return nil
-		}
-	}
-	cleanSchema(res)
-	if t, _ := res["type"].(string); t == "object" {
-		if _, hasProps := res["properties"]; !hasProps {
-			res["properties"] = map[string]any{}
-		}
-	}
-	b, err := json.Marshal(res)
-	if err != nil {
-		return nil
-	}
-	return json.RawMessage(b)
-}
