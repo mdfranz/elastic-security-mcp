@@ -15,32 +15,37 @@ The codebase has evolved through four major architectural paradigms, each using 
 
 The diagram below shows how the CLI application communicates with the LLM API and handles state across the different branches.
 
+#### `main` branch (`langchaingo`)
 ```mermaid
 graph TD
-    subgraph "main branch (langchaingo)"
-        A1[cli/main.go] -->|llms.Model| B1[GenerateContent]
-        A1 -->|memory.ConversationBuffer| C1[langchaingo/memory]
-        A1 -->|567 LoC Custom Provider| D1[internal/llm/gemini_model.go]
-        D1 -->|Google API| E1[Gemini Thought Signatures]
-    end
+    A1[cli/main.go] -->|llms.Model| B1[GenerateContent]
+    A1 -->|memory.ConversationBuffer| C1[langchaingo/memory]
+    A1 -->|567 LoC Custom Provider| D1[internal/llm/gemini_model.go]
+    D1 -->|Google API| E1[Gemini Thought Signatures]
+```
 
-    subgraph "any-llm-go branch"
-        A2[cli/main.go] -->|anyllm.Provider| B2[Completion]
-        A2 -->|68 LoC Custom Adapter| C2[internal/llm/memory.go]
-        B2 -->|any-llm-go| E2[Native Gemini/Anthropic/OpenAI]
-    end
+#### `any-llm-go` branch
+```mermaid
+graph TD
+    A2[cli/main.go] -->|anyllm.Provider| B2[Completion]
+    A2 -->|68 LoC Custom Adapter| C2[internal/llm/memory.go]
+    B2 -->|any-llm-go| E2[Native Gemini/Anthropic/OpenAI]
+```
 
-    subgraph "pi-llm-port branch"
-        A3[cli/main.go] -->|llm.LLM| B3[Complete]
-        A3 -->|Content Block Adapter| C3[internal/llm/memory.go]
-        B3 -->|pi-llm-go| E3[Block-Structured Request/Response]
-    end
+#### `pi-llm-port` branch
+```mermaid
+graph TD
+    A3[cli/main.go] -->|llm.LLM| B3[Complete]
+    A3 -->|Content Block Adapter| C3[internal/llm/memory.go]
+    B3 -->|pi-llm-go| E3[Block-Structured Request/Response]
+```
 
-    subgraph "zendev-goai branch (Current)"
-        A4[cli/main.go] -->|provider.LanguageModel| B4[goai.GenerateText]
-        A4 -->|In-memory message slice pruning| C4[No internal/llm/memory.go needed]
-        B4 -->|goai| E4[Structured Messages & Message Parts]
-    end
+#### `zendev-goai` branch (Current)
+```mermaid
+graph TD
+    A4[cli/main.go] -->|provider.LanguageModel| B4[goai.GenerateText]
+    A4 -->|In-memory message slice pruning| C4[No internal/llm/memory.go needed]
+    B4 -->|goai| E4[Structured Messages & Message Parts]
 ```
 
 ---
