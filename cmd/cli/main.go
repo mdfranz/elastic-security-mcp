@@ -1115,7 +1115,10 @@ func runSinglePrompt(modelFlag string, prompt string) {
 
 	history := []provider.Message{goai.UserMessage(prompt)}
 
+	step := 0
 	for {
+		step++
+		start := time.Now()
 		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
 			return goai.GenerateText(ctx, llmModel,
 				goai.WithMessages(history...),
@@ -1127,6 +1130,17 @@ func runSinglePrompt(modelFlag string, prompt string) {
 			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
 			os.Exit(1)
 		}
+
+		// Bake-off metrics: one structured line per model round-trip.
+		slog.Info("llm_call",
+			"model", modelName,
+			"step", step,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"input_tokens", result.TotalUsage.InputTokens,
+			"output_tokens", result.TotalUsage.OutputTokens,
+			"total_tokens", result.TotalUsage.TotalTokens,
+			"tool_calls", len(result.ToolCalls),
+		)
 
 		history = append(history, result.ResponseMessages...)
 
