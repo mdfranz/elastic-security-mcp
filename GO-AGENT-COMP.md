@@ -120,6 +120,195 @@ In all four implementations, the agent loop itself is **inlined directly within 
 
 ---
 
+## 💻 Concrete Code Examples
+
+### 1. Provider & Tool Setup Comparison
+
+This snippet demonstrates how tools discovered from the MCP server are converted into each library's native format.
+
+#### `main` (`langchaingo`)
+```go
+lcTools := make([]llms.Tool, 0, len(toolsResult.Tools))
+for _, t := range toolsResult.Tools {
+    lcTools = append(lcTools, llms.Tool{
+        Type: "function",
+        Function: &llms.FunctionDefinition{
+            Name:        t.Name,
+            Description: t.Description,
+            Parameters:  t.InputSchema,
+        },
+    })
+}
+```
+
+#### `any-llm-go`
+```go
+anyTools := make([]anyllm.Tool, 0, len(toolsResult.Tools))
+for _, t := range toolsResult.Tools {
+    anyTools = append(anyTools, anyllm.Tool{
+        Type: "function",
+        Function: anyllm.Function{
+            Name:        t.Name,
+            Description: t.Description,
+            Parameters:  convertSchema(t.InputSchema), // requires a schema fixer helper
+        },
+    })
+}
+```
+
+#### `pi-llm-port`
+```go
+tools := make([]llm.Tool, 0, len(toolsResult.Tools))
+for _, t := range toolsResult.Tools {
+    schemaBytes, _ := json.Marshal(t.InputSchema)
+    tools = append(tools, llm.Tool{
+        Name:        t.Name,
+        Description: t.Description,
+        InputSchema: json.RawMessage(schemaBytes), // flattened parameters
+    })
+}
+```
+
+#### `zendev-goai` (Current)
+```go
+tools := make([]goai.Tool, 0, len(toolsResult.Tools))
+for _, t := range toolsResult.Tools {
+    tools = append(tools, goai.Tool{
+        Name:        t.Name,
+        Description: t.Description,
+        InputSchema: t.InputSchema, // direct JSON schema mapping
+    })
+}
+```
+
+---
+
+### 2. Completion Request & Execution
+
+This section contrasts how prompt messages, system prompts, temperature controls, and tools are supplied during model invocation.
+
+#### `main` (`langchaingo`)
+```go
+resp, err := llmClient.GenerateContent(ctx, history, llms.WithTools(lcTools))
+choice := resp.Choices[0]
+content := choice.Content
+```
+
+#### `any-llm-go`
+```go
+resp, err := llmClient.Completion(ctx, anyllm.CompletionParams{
+    Model:    modelName,
+    Messages: history,
+    Tools:    anyTools,
+})
+choice := resp.Choices[0]
+content := choice.Message.ContentString()
+```
+
+#### `pi-llm-port`
+```go
+resp, err := llm.Complete(ctx, llmClient, llm.Request{
+    Model:       modelName,
+    System:      systemPrompt,             // system prompt moved out of messages slice
+    Messages:    m.history,
+    Tools:       m.tools,
+    Temperature: &tempZero,
+    MaxTokens:   4096,                     // plain int value
+})
+// Complete returns the message object directly (no choices array wrapper)
+```
+
+#### `zendev-goai` (Current)
+```go
+result, err := goai.GenerateText(m.ctx, m.llmModel,
+    goai.WithMessages(m.history...),
+    goai.WithSystem(systemPrompt),         // configuration via functional options
+    goai.WithTools(m.tools...),
+    goai.WithTemperature(0),
+    goai.WithMaxOutputTokens(4096),
+)
+content := result.Text
+```
+
+---
+
+### 3. Memory & History Management
+
+How conversation memory and sliding history window pruning are handled in the CLI.
+
+#### `main` (`langchaingo`)
+```go
+// Loading history from ConversationBuffer
+vars, err := m.mem.LoadMemoryVariables(m.ctx, nil)
+hist, _ := vars["history"].(string)
+
+// Appending user prompt to structured history
+m.history = append(m.history, llms.MessageContent{
+    Role:  llms.ChatMessageTypeHuman,
+    Parts: []llms.ContentPart{llms.TextContent{Text: input}},
+})
+```
+
+#### `any-llm-go` (Custom Memory Adapter)
+```go
+type ConversationBuffer struct {
+    mu       sync.Mutex
+    messages []anyllm.Message
+}
+
+func (cb *ConversationBuffer) SaveContext(ctx context.Context, input map[string]any, output map[string]any) error {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    inStr, _ := input["input"].(string)
+    outStr, _ := output["output"].(string)
+    if inStr != "" {
+        cb.messages = append(cb.messages, anyllm.Message{Role: anyllm.RoleUser, Content: inStr})
+    }
+    if outStr != "" {
+        cb.messages = append(cb.messages, anyllm.Message{Role: anyllm.RoleAssistant, Content: outStr})
+    }
+    return nil
+}
+```
+
+#### `pi-llm-port` (Block-based Memory)
+```go
+func (cb *ConversationBuffer) SaveContext(ctx context.Context, input map[string]any, output map[string]any) error {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    inStr, _ := input["input"].(string)
+    outStr, _ := output["output"].(string)
+    if inStr != "" {
+        cb.messages = append(cb.messages, llm.Message{
+            Role:    llm.RoleUser,
+            Content: []llm.Block{llm.TextBlock{Text: inStr}}, // block wrapper
+        })
+    }
+    // (similar for AI/Assistant response block)
+    return nil
+}
+```
+
+#### `zendev-goai` (Current - Direct Memory Pruning)
+```go
+// User prompt is appended directly as a goai message struct
+m.history = append(m.history, goai.UserMessage(input))
+
+if !m.useMemory {
+    m.pruneHistory()
+}
+
+// Slice-based sliding window history pruning in cmd/cli/main.go
+func (m *model) pruneHistory() {
+    if len(m.history) <= maxHistoryMessages {
+        return
+    }
+    m.history = m.history[len(m.history)-maxHistoryMessages:]
+}
+```
+
+---
+
 ## 📊 Summary Comparison Matrix
 
 | Feature / Metric | `main` (langchaingo) | `any-llm-go` | `pi-llm-port` | `zendev-goai` (Current) |
