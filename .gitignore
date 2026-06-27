@@ -1,4 +1,13 @@
-elastic-mcp-server	
-elastic-cli
-*.log
+# Build artifacts (binaries built at repo root from ./cmd/*)
+/cli
+/server
+/test-mcp
+/elastic-mcp-server
+/elastic-cli
 elastic-mcp-server.lock
+
+# Logs
+*.log
+
+# Tooling / scratch
+/.codex
