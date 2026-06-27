@@ -11,3 +11,4 @@ elastic-mcp-server.lock
 
 # Tooling / scratch
 /.codex
+/test_results/
