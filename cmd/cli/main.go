@@ -1139,6 +1139,9 @@ func runSinglePrompt(modelFlag string, prompt string) {
 			"input_tokens", result.TotalUsage.InputTokens,
 			"output_tokens", result.TotalUsage.OutputTokens,
 			"total_tokens", result.TotalUsage.TotalTokens,
+			"reasoning_tokens", result.TotalUsage.ReasoningTokens,
+			"cache_read_tokens", result.TotalUsage.CacheReadTokens,
+			"cache_write_tokens", result.TotalUsage.CacheWriteTokens,
 			"tool_calls", len(result.ToolCalls),
 		)
 
