@@ -18,7 +18,7 @@ The diagram below shows how the CLI application communicates with the LLM API an
 #### `main` branch (`langchaingo`)
 ```mermaid
 graph TD
-    A1[cli/main.go] -->|llms.Model| B1[GenerateContent]
+    A1[cmd/cli/main.go] -->|llms.Model| B1[GenerateContent]
     A1 -->|memory.ConversationBuffer| C1[langchaingo/memory]
     A1 -->|567 LoC Custom Provider| D1[internal/llm/gemini_model.go]
     D1 -->|Google API| E1[Gemini Thought Signatures]
@@ -27,15 +27,15 @@ graph TD
 #### `any-llm-go` branch
 ```mermaid
 graph TD
-    A2[cli/main.go] -->|anyllm.Provider| B2[Completion]
-    A2 -->|68 LoC Custom Adapter| C2[internal/llm/memory.go]
+    A2[cmd/cli/main.go] -->|anyllm.Provider| B2[Completion]
+    A2 -->|67 LoC Custom Adapter| C2[internal/llm/memory.go]
     B2 -->|any-llm-go| E2[Native Gemini/Anthropic/OpenAI]
 ```
 
 #### `pi-llm-port` branch
 ```mermaid
 graph TD
-    A3[cli/main.go] -->|llm.LLM| B3[Complete]
+    A3[cmd/cli/main.go] -->|llm.LLM| B3[Complete]
     A3 -->|Content Block Adapter| C3[internal/llm/memory.go]
     B3 -->|pi-llm-go| E3[Block-Structured Request/Response]
 ```
@@ -43,7 +43,7 @@ graph TD
 #### `zendev-goai` branch (Current)
 ```mermaid
 graph TD
-    A4[cli/main.go] -->|provider.LanguageModel| B4[goai.GenerateText]
+    A4[cmd/cli/main.go] -->|provider.LanguageModel| B4[goai.GenerateText]
     A4 -->|In-memory message slice pruning| C4[No internal/llm/memory.go needed]
     B4 -->|goai| E4[Structured Messages & Message Parts]
 ```
@@ -86,7 +86,7 @@ Conversational history must be preserved, formatted, and pruned during interacti
 *   **State Format**: Managed via `llms.MessageContent` slices.
 
 ### 2. `any-llm-go` (`any-llm-go`)
-*   **Approach**: A lightweight, custom `ConversationBuffer` implemented in `internal/llm/memory.go` (68 LoC).
+*   **Approach**: A lightweight, custom `ConversationBuffer` implemented in `internal/llm/memory.go` (67 LoC).
 *   **Integration**: Mimics the exact methods of the langchaingo memory buffer (`SaveContext` and `LoadMemoryVariables`) to prevent breaking consumers in the CLI TUI (`cmd/cli/main.go`) and the Web UI server (`internal/webui/server.go`).
 *   **State Format**: Managed via slices of `anyllm.Message` containing simple strings.
 
@@ -99,7 +99,7 @@ Conversational history must be preserved, formatted, and pruned during interacti
 *   **Approach**: Direct in-memory slice manipulation. The codebase **deletes** `internal/llm/memory.go` entirely.
 *   **Integration**: Instead of wrapping memory in an abstract buffer object, history is maintained directly in the CLI's Bubble Tea model (`history []provider.Message`) and the Web UI's WebSocket loop (`history []provider.Message`).
 *   **State Format**: Slices of `provider.Message` containing `provider.Part` elements (such as `PartText`, `PartToolCall`, and `PartToolResult`).
-*   **Pruning**: Implemented procedurally via a simple helper function `pruneHistory()` in the CLI and UI, keeping the last 15 messages when memory is disabled or when sliding windows are applied.
+*   **Pruning**: Implemented procedurally via a simple helper function `pruneHistory()` in the CLI (`cmd/cli/main.go`), keeping the last 15 messages (`maxHistoryMessages`) when memory is disabled. Note: this is an **implementation gap rather than a framework limitation** — the Web UI (`internal/webui/server.go`) currently has *no* pruning and grows history unbounded (`*history = append(*history, result.ResponseMessages...)`). A shared pruning helper would close the gap.
 
 ---
 
@@ -314,9 +314,10 @@ func (m *model) pruneHistory() {
 | Feature / Metric | `main` (langchaingo) | `any-llm-go` | `pi-llm-port` | `zendev-goai` (Current) |
 | :--- | :--- | :--- | :--- | :--- |
 | **Orchestration Core** | Framework-based | Lightweight Client | Minimalist Client | Structured Part Client |
-| **Module Footprint** | Extremely Heavy (vector DBs, cloud SDKs) | Moderate (Standard API) | Minimal (No extra transitive deps) | Light (Clean, modular) |
+| **Module Footprint** (go.mod require entries / go.sum lines) | 62 / 178 (broad API surface, pulls `google.golang.org/api`) | 87 / 239 (heaviest by both metrics) | 60 / 166 (lightest) | 60 / 170 |
+| **Dependency Sourcing** | Published (`langchaingo v0.1.14`) | Local `replace` (unpublished checkout) | Local `replace` (unpublished checkout) | Published (`goai v0.8.5`) |
 | **Custom Model Wrappers** | Yes (`gemini_model.go`, 567 lines) | No (native wrapper) | No (native wrapper) | No (native wrapper) |
-| **Memory Adapter** | Langchaingo library | Custom Adapter (68 LoC) | Custom Adapter (72 LoC) | None (Direct TUI/Web UI slice handling) |
+| **Memory Adapter** | Langchaingo library | Custom Adapter (67 LoC) | Custom Adapter (73 LoC) | None (Direct TUI/Web UI slice handling) |
 | **System Prompt Delivery**| Prepended to message history | Prepended to message history | Specified in `llm.Request.System` | Passed to `goai.WithSystem()` |
 | **Tool Definition Format**| Typed nested structures | Typed nested structures | Flat struct with schema bytes | Flat `goai.Tool` with MCP schema |
 | **Web UI Integration** | Websocket / Raw JSON | Websocket / Raw JSON | Websocket / Raw JSON | Websocket / Raw JSON |
@@ -325,18 +326,24 @@ func (m *model) pruneHistory() {
 
 ## 📝 Integration Quality and Developer Velocity Assessment
 
+> **Framework vs. implementation.** The points below separate **framework-inherent** traits (consequences of the library's design that any consumer would hit) from **implementation choices** (decisions made in *this* codebase that could be optimized without changing libraries). Many "cons" attributed to a framework in earlier drafts were really artifacts of how this project wired it up — most could be improved within the same library.
+
 ### 1. Langchaingo (`main`)
-*   **Pros**: Uses a standard framework with broad recognition.
-*   **Cons**: Massive binary footprint and transitive dependencies. The lack of native Gemini features created a massive maintenance burden, requiring a custom 567 LoC implementation of the Gemini API client just to extract reasoning traces.
+*   **Framework — Pros**: Standard framework with broad recognition; batteries-included abstractions (`memory.ConversationBuffer`) work out of the box.
+*   **Framework — Cons**: At the time of writing it lacked native Gemini thought-signature support. Extracting reasoning traces required dropping to the raw HTTP candidate parts — a genuine library gap, not a wiring choice. Broad API surface pulls heavier transitive deps (e.g. `google.golang.org/api`), though by module count (62) it is *comparable to*, not heavier than, the other branches (see matrix — `any-llm-go` is actually the heaviest). The "vector DB" framing in earlier drafts was incorrect: no vector-DB dependency is present (`alecthomas/chroma` is a syntax highlighter).
+*   **Implementation — Cons**: The 567 LoC `gemini_model.go` is partly a consequence of the framework gap, but its size also reflects an implementation choice to fully reimplement a provider rather than wrap a narrower slice. A thinner shim over `google.golang.org/genai` could likely have cut this substantially.
 
 ### 2. `any-llm-go`
-*   **Pros**: Solved the Gemini thought signature parsing issue natively, clean API wrappers, allowed dropping a lot of boilerplates.
-*   **Cons**: Custom memory wrapper kept the interface identical to langchaingo but carried over some API complexity (e.g. nested parameters object).
+*   **Framework — Pros**: Solved Gemini thought-signature parsing natively (native wrapper around `google.golang.org/genai`), enabling deletion of the 567 LoC custom provider. Clean OpenAI-style `Completion`/`Choices` shape that most developers already know.
+*   **Framework — Cons**: Carries the nested `Function.Parameters` object shape, and its schema handling required a `convertSchema()` fixer helper in this project. Heaviest dependency graph of the four (87 require entries / 239 go.sum lines).
+*   **Implementation — Cons**: The custom `ConversationBuffer` (67 LoC) deliberately mirrored the langchaingo interface (`SaveContext`/`LoadMemoryVariables`) to avoid touching consumers — a velocity-preserving choice, but it carried legacy `map[string]any` plumbing forward. The `convertSchema` helper is duplicated at two call sites and could be centralized. Currently consumed via a local `replace` directive (unpublished).
 
 ### 3. `pi-llm-port`
-*   **Pros**: Extremely clean and modern block-based API model. Moving the system prompt out of the message array aligns perfectly with Anthropic and Gemini native API shapes.
-*   **Cons**: Requires a full rewrite of message-handling helpers (like `summarizeHistoryForLog`) to accommodate `[]llm.Block` type-switching, slightly increasing CLI code complexity in exchange for backend simplicity.
+*   **Framework — Pros**: Extremely clean, minimal block-based API; lightest dependency graph (60 / 166). Moving the system prompt out of the message array (`Request.System`) aligns with Anthropic/Gemini native shapes. No `Choices` wrapper — a single `*llm.Message` with a `[]llm.Block`.
+*   **Framework — Cons**: The block-structured response forces type-switching (`llm.TextBlock` / `llm.ToolCallBlock` / `llm.ToolResultBlock`) at every read site — inherent to the design.
+*   **Implementation — Cons**: Required rewriting message helpers (e.g. `summarizeHistoryForLog`) for `[]llm.Block`. The retained `ConversationBuffer` (73 LoC) is heavier than necessary now that the block model could be stored directly. Consumed via a local `replace` directive (unpublished).
 
 ### 4. `zendev-goai` (Active Branch)
-*   **Pros**: Excellent balance of structure and simplicity. It allows removing memory files altogether in favor of native Go slices. Integrates directly with MCP schemas without manual mapping.
-*   **Cons**: The lack of a shared helper/adapter layer for memory leads to duplicated history-rendering code in `cmd/cli/main.go` and `internal/webui/server.go`. Moving the system prompt to options (`goai.WithSystem`) and message mapping works elegantly.
+*   **Framework — Pros**: Strong balance of structure and simplicity. Part-structured `provider.Message`/`provider.Part` model maps cleanly to MCP schemas with no manual conversion (`InputSchema` passed through directly). Functional options (`goai.WithSystem`, `goai.WithTools`, …) read well. Only branch consuming a **published, versioned** module (`goai v0.8.5`) rather than a local checkout.
+*   **Framework — Cons**: Relatively young/low-version library (`v0.8.5`) — API stability and ecosystem maturity carry more risk than `langchaingo`.
+*   **Implementation — Cons** (all optimizable without leaving `goai`): (a) **No shared memory/adapter layer** — `renderHistoryText` and history handling are duplicated across `cmd/cli/main.go` and `internal/webui/server.go`; (b) **Pruning is inconsistent** — the CLI prunes to `maxHistoryMessages` (15) but the Web UI grows history **unbounded**; both are bugs of omission, not framework constraints. A single shared `pruneHistory`/render helper would resolve both.

@@ -14,6 +14,7 @@ import (
 	goaimcp "github.com/zendev-sh/goai/mcp"
 	"github.com/zendev-sh/goai/provider"
 	"github.com/gorilla/websocket"
+	"github.com/mfranz/elastic-security-mcp/internal/conv"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 )
 
@@ -129,7 +130,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if !s.useMemory {
 					s.sendMessage(conn, WebMessage{Type: "system", Content: "Conversation memory is disabled."})
 				} else {
-					hist := renderHistoryText(history)
+					hist := conv.RenderText(history)
 					if hist == "" {
 						hist = "(empty)"
 					}
@@ -140,6 +141,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 			s.sendMessage(conn, WebMessage{Type: "user", Content: userInput})
 			history = append(history, goai.UserMessage(userInput))
+
+			// Bound history when memory is disabled, matching the CLI's
+			// per-turn pruning so Web UI sessions don't grow unbounded.
+			if !s.useMemory {
+				history = conv.Prune(history, conv.MaxMessages)
+			}
 
 			s.processConversation(r.Context(), conn, &history, userInput)
 		}
@@ -323,18 +330,3 @@ func extractToolText(toolResp *goaimcp.CallToolResult) string {
 	return sb.String()
 }
 
-func renderHistoryText(history []provider.Message) string {
-	var sb strings.Builder
-	for _, msg := range history {
-		for _, p := range msg.Content {
-			if p.Type == provider.PartText && p.Text != "" {
-				role := "Human"
-				if msg.Role == provider.RoleAssistant {
-					role = "AI"
-				}
-				sb.WriteString(fmt.Sprintf("%s: %s\n", role, p.Text))
-			}
-		}
-	}
-	return sb.String()
-}

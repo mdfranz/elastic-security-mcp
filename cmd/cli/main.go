@@ -26,6 +26,7 @@ import (
 	"github.com/zendev-sh/goai/provider/anthropic"
 	"github.com/zendev-sh/goai/provider/google"
 	"github.com/zendev-sh/goai/provider/openai"
+	"github.com/mfranz/elastic-security-mcp/internal/conv"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/mfranz/elastic-security-mcp/internal/webui"
 	"github.com/spf13/cobra"
@@ -55,7 +56,6 @@ TOOL SELECTION GUIDE — call the right tool immediately:
 - kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
 const maxLoggedPayloadChars = 4000
-const maxHistoryMessages = 15
 const footerReserveLines = 9
 
 // Styles
@@ -439,10 +439,7 @@ func (m *model) browseHistory(delta int) {
 }
 
 func (m *model) pruneHistory() {
-	if len(m.history) <= maxHistoryMessages {
-		return
-	}
-	m.history = m.history[len(m.history)-maxHistoryMessages:]
+	m.history = conv.Prune(m.history, conv.MaxMessages)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -510,7 +507,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, systemStyle.Render(msg))
 					m.appendConversation("system", msg)
 				} else {
-					hist := renderHistoryText(m.history)
+					hist := conv.RenderText(m.history)
 					if hist == "" {
 						hist = "(empty)"
 					}
@@ -793,74 +790,13 @@ func extractToolText(toolResp *goaimcp.CallToolResult) string {
 	return sb.String()
 }
 
-func renderHistoryText(history []provider.Message) string {
-	var sb strings.Builder
-	for _, msg := range history {
-		for _, p := range msg.Content {
-			if p.Type == provider.PartText && p.Text != "" {
-				role := "Human"
-				if msg.Role == provider.RoleAssistant {
-					role = "AI"
-				}
-				sb.WriteString(fmt.Sprintf("%s: %s\n", role, p.Text))
-			}
-		}
-	}
-	return sb.String()
-}
-
-func summarizeHistoryForLog(history []provider.Message) string {
-	type partSummary map[string]any
-	type messageSummary map[string]any
-
-	summary := make([]messageSummary, 0, len(history))
-	for i, msg := range history {
-		var parts []partSummary
-		for _, p := range msg.Content {
-			switch p.Type {
-			case provider.PartText:
-				parts = append(parts, partSummary{
-					"type":    "text",
-					"chars":   len(p.Text),
-					"preview": util.TruncateForLog(p.Text, 160),
-				})
-			case provider.PartToolCall:
-				parts = append(parts, partSummary{
-					"type":      "tool_call",
-					"name":      p.ToolName,
-					"id":        p.ToolCallID,
-					"arg_chars": len(p.ToolInput),
-					"args":      util.TruncateForLog(string(p.ToolInput), 240),
-				})
-			case provider.PartToolResult:
-				parts = append(parts, partSummary{
-					"type":         "tool_result",
-					"tool_call_id": p.ToolCallID,
-					"chars":        len(p.ToolOutput),
-					"preview":      util.TruncateForLog(p.ToolOutput, 240),
-				})
-			}
-		}
-		summary = append(summary, messageSummary{
-			"index": i,
-			"role":  string(msg.Role),
-			"parts": parts,
-		})
-	}
-	b, err := json.Marshal(summary)
-	if err != nil {
-		return fmt.Sprintf("failed to summarize history: %v", err)
-	}
-	return string(b)
-}
-
 func (m model) generateResponse() tea.Cmd {
 	return func() tea.Msg {
 		slog.Debug("LLM request summary",
 			"model", m.modelName,
 			"tool_count", len(m.tools),
 			"message_count", len(m.history),
-			"summary", summarizeHistoryForLog(m.history),
+			"summary", conv.SummarizeForLog(m.history),
 		)
 
 		result, err := util.WithRetry(m.ctx, func() (*goai.TextResult, error) {
