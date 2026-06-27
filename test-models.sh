@@ -56,6 +56,7 @@ fi
 if [ -n "$GEMINI_API_KEY" ]; then
     test_model "gemini-3-flash-preview"
     test_model "gemini-3.1-pro-preview"
+    test_model "gemini-3.5-flash"
 fi
 
 if [ -z "$OPENAI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$GEMINI_API_KEY" ]; then
