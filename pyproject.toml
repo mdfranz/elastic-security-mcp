@@ -1,0 +1,8 @@
+[project]
+name = "elastic-security-mcp-tools"
+version = "0.1.0"
+description = "Python test clients for elastic-security-mcp"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai>=2.4.0",
+]
