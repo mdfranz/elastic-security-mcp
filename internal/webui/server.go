@@ -9,16 +9,20 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	goai "github.com/zendev-sh/goai"
 	goaimcp "github.com/zendev-sh/goai/mcp"
 	"github.com/zendev-sh/goai/provider"
 	"github.com/gorilla/websocket"
+	"github.com/mfranz/elastic-security-mcp/internal/llmobs"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 )
 
 //go:embed assets/*
 var assets embed.FS
+
+const maxLoggedPayloadChars = 4000
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -149,16 +153,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]provider.Message, lastUserInput string) {
 	for {
 		s.sendMessage(conn, WebMessage{Type: "status", Content: "Analyzing request...", Thinking: true})
-		slog.Info("LLM request", "history_len", len(*history), "model", s.modelName)
 
 		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
-			return goai.GenerateText(ctx, s.llmModel,
+			opts := append(llmobs.Hooks(),
 				goai.WithMessages(*history...),
 				goai.WithSystem(systemPrompt),
 				goai.WithTools(s.tools...),
 				goai.WithTemperature(0),
 				goai.WithMaxOutputTokens(4096),
 			)
+			return goai.GenerateText(ctx, s.llmModel, opts...)
 		})
 
 		if err != nil {
@@ -209,14 +213,36 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 				}
 				s.sendMessage(conn, WebMessage{Type: "tool", Tool: toolEvent})
 
+				slog.Info("Executing tool", "name", tc.Name, "arg_chars", len(tc.Input), "id", tc.ID)
+				if util.ClientPayloadLoggingEnabled() {
+					slog.Debug("Tool arguments", "name", tc.Name, "args", util.TruncateForLog(string(tc.Input), maxLoggedPayloadChars))
+				}
+
+				start := time.Now()
 				toolResp, callErr := s.mcpClient.CallTool(ctx, tc.Name, args)
+				latencyMs := time.Since(start).Milliseconds()
 
 				resultText := ""
 				isError := callErr != nil || (toolResp != nil && toolResp.IsError)
 				if callErr != nil {
 					resultText = fmt.Sprintf("error: %v", callErr)
+					slog.Error("Tool call error", "name", tc.Name, "latency_ms", latencyMs, "error", callErr)
 				} else {
 					resultText = extractToolText(toolResp)
+					if toolResp != nil && toolResp.IsError {
+						slog.Warn("Tool returned error status",
+							"name", tc.Name,
+							"latency_ms", latencyMs,
+							"error_preview", util.TruncateForLog(resultText, 500),
+						)
+					} else {
+						slog.Debug("Tool execution successful",
+							"name", tc.Name,
+							"latency_ms", latencyMs,
+							"result_len", len(resultText),
+							"result_preview", util.TruncateForLog(resultText, 500),
+						)
+					}
 				}
 
 				isCached := false

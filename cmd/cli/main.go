@@ -27,6 +27,7 @@ import (
 	"github.com/zendev-sh/goai/provider/anthropic"
 	"github.com/zendev-sh/goai/provider/google"
 	"github.com/zendev-sh/goai/provider/openai"
+	"github.com/mfranz/elastic-security-mcp/internal/llmobs"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/mfranz/elastic-security-mcp/internal/webui"
 	"github.com/spf13/cobra"
@@ -888,13 +889,14 @@ func (m model) generateResponse() tea.Cmd {
 		)
 
 		result, err := util.WithRetry(m.ctx, func() (*goai.TextResult, error) {
-			return goai.GenerateText(m.ctx, m.llmModel,
+			opts := append(llmobs.Hooks(),
 				goai.WithMessages(m.history...),
 				goai.WithSystem(systemPrompt),
 				goai.WithTools(m.tools...),
 				goai.WithTemperature(0),
 				goai.WithMaxOutputTokens(4096),
 			)
+			return goai.GenerateText(m.ctx, m.llmModel, opts...)
 		})
 		if err != nil {
 			slog.Error("LLM generation error", "error", err)
@@ -1206,11 +1208,12 @@ func runSinglePrompt(modelFlag string, prompt string) {
 
 	for {
 		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
-			return goai.GenerateText(ctx, llmModel,
+			opts := append(llmobs.Hooks(),
 				goai.WithMessages(history...),
 				goai.WithSystem(systemPrompt),
 				goai.WithTools(tools...),
 			)
+			return goai.GenerateText(ctx, llmModel, opts...)
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
