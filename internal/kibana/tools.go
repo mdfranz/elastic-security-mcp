@@ -129,9 +129,9 @@ func RegisterTools(server *mcp.Server, client *Client) {
 
 		path := "/api/detection_engine/rules"
 		if args.Id != "" {
-			path += "?id=" + args.Id
+			path += "?id=" + url.QueryEscape(args.Id)
 		} else {
-			path += "?rule_id=" + args.RuleId
+			path += "?rule_id=" + url.QueryEscape(args.RuleId)
 		}
 
 		slog.Info("get_detection_rule called", "id", args.Id, "rule_id", args.RuleId, "path", path)

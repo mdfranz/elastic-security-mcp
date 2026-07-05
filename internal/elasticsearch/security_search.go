@@ -69,7 +69,7 @@ var summaryFallbackPaths = []string{
 }
 
 // ensureSearchTimeout applies the shared configurable tool timeout (TOOL_TIMEOUT_SECS).
-func ensureSearchTimeout(ctx context.Context) context.Context {
+func ensureSearchTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return ensureToolTimeout(ctx)
 }
 
@@ -205,7 +205,8 @@ func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args S
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
 	}
 
-	ctx = ensureSearchTimeout(ctx)
+	ctx, cancel := ensureSearchTimeout(ctx)
+	defer cancel()
 	req := buildSecuritySearchRequest(args)
 	slog.Info("search_security_events called", "index", args.Index, "size", args.Size, "from", args.From, "text", args.Text, "start", args.Start, "end", args.End, "ip", args.IP, "src_ip", args.SrcIP, "dst_ip", args.DstIP, "mac", args.MAC, "domain", args.Domain, "url", args.URL, "dataset", args.Dataset)
 	if queryJSON, err := json.Marshal(req); err == nil {
@@ -273,15 +274,7 @@ func hasSecurityConstraint(args SearchSecurityEventsArgs) bool {
 	return args.Text != "" || args.Start != "" || args.End != "" || args.IP != "" || args.SrcIP != "" || args.DstIP != "" || args.MAC != "" || args.Domain != "" || args.URL != "" || args.Dataset != ""
 }
 
-func securityFilterCount(args SearchSecurityEventsArgs) int {
-	count := 0
-	for _, v := range []string{args.Start, args.End, args.IP, args.SrcIP, args.DstIP, args.MAC, args.Domain, args.URL, args.Dataset} {
-		if v != "" {
-			count++
-		}
-	}
-	return count
-}
+
 
 func buildSecuritySearchRequest(args SearchSecurityEventsArgs) *typedsearch.Request {
 	req := typedsearch.NewRequest()
@@ -651,7 +644,8 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 		return nil, err
 	}
 
-	ctx = ensureExportTimeout(ctx)
+	ctx, cancel := ensureExportTimeout(ctx)
+	defer cancel()
 	batchTimeout := ExportBatchTimeout()
 	maxFileBytes := int64(normalized.MaxFileMB) * 1024 * 1024
 	slog.Info("export_security_events called", "index", normalized.Index, "filepath", normalized.Filepath, "max_file_mb", normalized.MaxFileMB, "start", normalized.Start, "end", normalized.End)

@@ -72,7 +72,8 @@ func runSecurityAlertsSearch(ctx context.Context, es *Client, args SearchSecurit
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
 	}
 
-	ctx = ensureSearchTimeout(ctx)
+	ctx, cancel := ensureSearchTimeout(ctx)
+	defer cancel()
 	req := buildSecurityAlertsRequest(args)
 	indexPattern := ".alerts-security.alerts-*"
 
