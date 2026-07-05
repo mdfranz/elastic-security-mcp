@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -777,6 +778,29 @@ func formatToolCallArguments(tc provider.ToolCall) string {
 	return strings.Join(final, "\n")
 }
 
+// stopServer asks the spawned elastic-mcp-server subprocess to shut down
+// gracefully (SIGTERM) before closing the MCP client. The goai StdioTransport's
+// Close() sends SIGKILL immediately, which never gives the server a chance to
+// run its deferred cleanup (removing its lock file), so we terminate it
+// ourselves first and only fall back to the transport's hard kill if it
+// doesn't exit in time.
+func stopServer(mcpClient *goaimcp.Client) {
+	if data, err := os.ReadFile(util.ServerLockFile()); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if proc, err := os.FindProcess(pid); err == nil {
+				proc.Signal(syscall.SIGTERM)
+				for i := 0; i < 20; i++ {
+					if proc.Signal(syscall.Signal(0)) != nil {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}
+	}
+	mcpClient.Close()
+}
+
 func extractToolText(toolResp *goaimcp.CallToolResult) string {
 	if toolResp == nil {
 		return ""
@@ -1157,11 +1181,12 @@ func runSinglePrompt(modelFlag string, prompt string) {
 		fmt.Fprintf(os.Stderr, "Failed to connect to MCP server: %v\n", err)
 		os.Exit(1)
 	}
-	defer mcpClient.Close()
+	defer stopServer(mcpClient)
 
 	toolsResult, err := mcpClient.ListTools(ctx, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to list tools: %v\n", err)
+		stopServer(mcpClient)
 		os.Exit(1)
 	}
 
@@ -1189,6 +1214,7 @@ func runSinglePrompt(modelFlag string, prompt string) {
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
+			stopServer(mcpClient)
 			os.Exit(1)
 		}
 
@@ -1234,11 +1260,12 @@ func runWebUI(modelFlag string, memoryFlag bool, port int) {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer mcpClient.Close()
+	defer stopServer(mcpClient)
 
 	fmt.Printf("Web UI starting at http://localhost:%d\n", port)
 	if err := webui.RunServer(ctx, mcpClient, llmModel, tools, modelName, port, memoryFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Web UI error: %v\n", err)
+		stopServer(mcpClient)
 		os.Exit(1)
 	}
 }
@@ -1425,12 +1452,13 @@ func runApp(modelFlag string, memoryFlag bool) {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer mcpClient.Close()
+	defer stopServer(mcpClient)
 
 	// Run Bubble Tea
 	p := tea.NewProgram(initialModel(ctx, mcpClient, llmModel, tools, modelName, memoryFlag), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
+		stopServer(mcpClient)
 		os.Exit(1)
 	}
 }

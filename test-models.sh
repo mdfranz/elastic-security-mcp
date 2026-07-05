@@ -15,8 +15,8 @@ CLI_BIN="./elastic-cli"
 
 # Ensure binaries are built
 echo "Building binaries..."
-go build -o $SERVER_BIN ./cmd/server/main.go
-go build -o $CLI_BIN ./cmd/cli/main.go
+go build -o $SERVER_BIN ./cmd/server
+go build -o $CLI_BIN ./cmd/cli
 
 export ELASTIC_MCP_SERVER=$SERVER_BIN
 export CLIENT_LOG_LEVEL=debug

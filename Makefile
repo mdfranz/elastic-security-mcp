@@ -7,7 +7,7 @@ COMPOSE=podman compose
 all: build build-cli
 
 build:
-	go build -o $(BINARY_NAME) ./cmd/server/main.go
+	go build -o $(BINARY_NAME) ./cmd/server
 
 build-cli:
 	go build -o $(CLI_NAME) ./cmd/cli/
