@@ -55,7 +55,8 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
 	}
 
-	ctx = ensureSearchTimeout(ctx)
+	ctx, cancel := ensureSearchTimeout(ctx)
+	defer cancel()
 	slog.Info("search_processes called",
 		"executable", args.Executable,
 		"command_line", args.CommandLine,

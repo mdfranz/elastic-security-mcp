@@ -39,6 +39,8 @@ type LookupIPArgs struct {
 
 var maxResponseChars int
 var defaultToolTimeout time.Duration
+var exportToolTimeout time.Duration
+var exportBatchTimeout time.Duration
 
 func init() {
 	maxResponseChars = 20000
@@ -53,19 +55,46 @@ func init() {
 			defaultToolTimeout = time.Duration(secs) * time.Second
 		}
 	}
+	exportToolTimeout = 30 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("EXPORT_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			exportToolTimeout = time.Duration(secs) * time.Second
+		}
+	}
+	exportBatchTimeout = 180 * time.Second
+	if v := strings.TrimSpace(os.Getenv("EXPORT_BATCH_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			exportBatchTimeout = time.Duration(secs) * time.Second
+		}
+	}
 }
 
 func MaxResponseChars() int {
 	return maxResponseChars
 }
 
-func ensureToolTimeout(ctx context.Context) context.Context {
+func ensureToolTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultToolTimeout)
-		_ = cancel
+		return context.WithTimeout(ctx, defaultToolTimeout)
 	}
-	return ctx
+	return ctx, func() {}
+}
+
+// ensureExportTimeout applies a much longer timeout than other tools, since an
+// export paginates through potentially tens of thousands of rows in one call.
+func ensureExportTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); !ok {
+		return context.WithTimeout(ctx, exportToolTimeout)
+	}
+	return ctx, func() {}
+}
+
+// ExportBatchTimeout returns the per-scroll-batch timeout for exports. This is
+// deliberately much shorter than the overall export timeout so a single slow or
+// hung Elasticsearch scroll response fails fast with a clear error, rather than
+// silently blocking for up to the full export duration.
+func ExportBatchTimeout() time.Duration {
+	return exportBatchTimeout
 }
 
 func truncateResults(result map[string]interface{}) {
@@ -160,12 +189,14 @@ func normalizeSearchArgs(args SearchArgs) SearchArgs {
 func RegisterTools(server *mcp.Server, es *Client) {
 	cache := NewToolCache()
 	RegisterSecuritySearchTool(server, es, cache)
+	RegisterExportSecurityEventsTool(server, es)
 	RegisterSecurityAlertsTool(server, es, cache)
 	RegisterProcessSearchTool(server, es, cache)
 
 	// Register List Indices Tool
 	listHandler := WrapWithCache(cache, "list_indices", ListIndicesTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
-		ctx = ensureToolTimeout(ctx)
+		ctx, cancel := ensureToolTimeout(ctx)
+		defer cancel()
 		slog.Info("list_indices called", "pattern", args.Pattern)
 
 		opts := []func(*esapi.CatIndicesRequest){
@@ -230,7 +261,8 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	// Register Search Tool
 	searchHandler := WrapWithCache(cache, "search_elastic", SearchElasticTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
-		ctx = ensureToolTimeout(ctx)
+		ctx, cancel := ensureToolTimeout(ctx)
+		defer cancel()
 		if args.Index == "" {
 			return nil, nil, fmt.Errorf("index is required")
 		}
@@ -266,9 +298,10 @@ func RegisterTools(server *mcp.Server, es *Client) {
 			err := HttpError("search", searchRes)
 			errMsg := fmt.Sprintf("%v", err)
 
-			// Collapse field not mapped: retry without collapse clause
+			// Collapse field not mapped: retry without collapse clause.
+			// Note: searchRes.Body is already consumed by HttpError above and
+			// will be closed by the deferred close — do not close it again here.
 			if strings.Contains(errMsg, "in order to collapse on") {
-				searchRes.Body.Close()
 				if retryQuery, stripped := withoutCollapse(queryStr); stripped {
 					slog.Info("search failed due to collapse mapping; retrying without collapse clause", "index", args.Index)
 					retryRes, retryErr := es.Raw.Search(
@@ -359,7 +392,8 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		Description: "Return Elasticsearch cluster health: status (green/yellow/red), node counts, shard counts, and unassigned shards. Use level=indices or level=shards for more detail.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ClusterHealthArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("cluster_health", &err)
-		ctx = ensureToolTimeout(ctx)
+		ctx, cancel := ensureToolTimeout(ctx)
+		defer cancel()
 		slog.Info("cluster_health called", "level", args.Level)
 
 		level := strings.TrimSpace(args.Level)

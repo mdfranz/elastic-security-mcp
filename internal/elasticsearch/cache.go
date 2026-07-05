@@ -100,6 +100,9 @@ func cacheKey(toolName string, args any) (string, error) {
 }
 
 func (c *ToolCache) Get(ctx context.Context, key string) (string, bool) {
+	if c.client == nil {
+		return "", false
+	}
 	val, err := c.client.Get(ctx, key).Result()
 	if err == nil {
 		return val, true
@@ -111,6 +114,9 @@ func (c *ToolCache) Get(ctx context.Context, key string) (string, bool) {
 }
 
 func (c *ToolCache) Set(ctx context.Context, key, text string, ttl time.Duration) {
+	if c.client == nil {
+		return
+	}
 	if err := c.client.Set(ctx, key, text, ttl).Err(); err != nil {
 		slog.Warn("redis set error", "error", err)
 	}
