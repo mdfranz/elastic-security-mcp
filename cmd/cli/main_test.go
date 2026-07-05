@@ -6,48 +6,8 @@ import (
 	"time"
 )
 
-func TestNormalizeToolResultText(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		wantText string
-		cached   bool
-		stored   bool
-	}{
-		{
-			name:     "cache hit prefix is removed",
-			input:    "✓ cached result",
-			wantText: "cached result",
-			cached:   true,
-		},
-		{
-			name:     "cache store prefix is removed",
-			input:    "↓ fresh result",
-			wantText: "fresh result",
-			stored:   true,
-		},
-		{
-			name:     "plain result is untouched",
-			input:    "plain result",
-			wantText: "plain result",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotText, gotCached, gotStored := normalizeToolResultText(tt.input)
-			if gotText != tt.wantText {
-				t.Fatalf("text = %q, want %q", gotText, tt.wantText)
-			}
-			if gotCached != tt.cached {
-				t.Fatalf("cached = %v, want %v", gotCached, tt.cached)
-			}
-			if gotStored != tt.stored {
-				t.Fatalf("stored = %v, want %v", gotStored, tt.stored)
-			}
-		})
-	}
-}
+// normalizeToolResultText moved to internal/agent; see
+// TestNormalizeToolResultText there.
 
 func TestBuildMarkdownExport(t *testing.T) {
 	exportedAt := time.Date(2026, 5, 5, 9, 30, 0, 0, time.UTC)

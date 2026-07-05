@@ -27,36 +27,12 @@ import (
 	"github.com/zendev-sh/goai/provider/anthropic"
 	"github.com/zendev-sh/goai/provider/google"
 	"github.com/zendev-sh/goai/provider/openai"
-	"github.com/mfranz/elastic-security-mcp/internal/llmobs"
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/mfranz/elastic-security-mcp/internal/webui"
 	"github.com/spf13/cobra"
 )
 
-const systemPrompt = `You are a silent Elastic Security analyst tool.
-YOUR ONLY JOB IS TO CALL TOOLS.
-NEVER explain what you are doing.
-NEVER say "I will search" or "Let me check" or "Now I'll".
-IF YOU NEED DATA, CALL THE APPROPRIATE SEARCH OR LOOKUP TOOL IMMEDIATELY.
-DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
-ALWAYS use Markdown tables for tabular data.
-
-DO ASK FOLLOW-UP QUESTIONS IF GUIDANCE IS NOT CLEAR. 
-DO NOT JUST START SEARCHING IF YOU ARE NOT GIVEN CLEAR GUIDANCE.
-
-TOOL SELECTION GUIDE — call the right tool immediately:
-- search_security_alerts: detection alerts from Elastic Security rules
-- search_processes: endpoint process events (automatically searches logs-endpoint.events.process-*)
-- search_security_events: network and endpoint events — use index logs-zeek.*-* for Zeek, logs-suricata.*-* for Suricata, packetbeat-* for Packetbeat, logs-endpoint.events.network-* or logs-endpoint.events.file-* for endpoint
-- list_indices: discover available indices before searching if unsure
-- list_kibana_spaces: discover or list available Kibana spaces
-- list_detection_rules / get_detection_rule: inspect or browse detection rules
-- list_agents: check Elastic Agent / Fleet status
-- lookup_domain / lookup_ip: fast DNS history lookup from cache
-- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
-- kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
-
-const maxLoggedPayloadChars = 4000
 const maxHistoryMessages = 15
 const footerReserveLines = 9
 
@@ -108,26 +84,16 @@ var (
 			Foreground(lipgloss.Color("#A8A8A8"))
 )
 
-// Messages
-type generateMsg struct{}
-type llmResponseMsg struct {
-	result *goai.TextResult
-}
-type executeToolsMsg struct {
-	toolCalls []provider.ToolCall
-}
-type toolsResultMsg struct {
-	results  []provider.Message
-	outcomes []toolOutcome
-}
-type errMsg struct {
-	err error
-}
-
-type toolOutcome struct {
-	isCached bool
-	isStored bool
-	isError  bool
+// agentEvent wraps an agent.Event for the Bubble Tea message chain. A
+// background goroutine (started by startTurn) pushes these onto a channel as
+// the shared agent.Engine progresses through a turn; Update drains one at a
+// time via waitForAgentEvent so the TUI can render incremental tool-call
+// progress instead of waiting for the whole turn to finish. done/result are
+// set on the final value sent before the channel is closed.
+type agentEvent struct {
+	ev     agent.Event
+	done   bool
+	result agent.TurnResult
 }
 
 type exportMessage struct {
@@ -144,9 +110,8 @@ const (
 
 type model struct {
 	ctx       context.Context
-	mcpClient *goaimcp.Client
-	llmModel  provider.LanguageModel
-	tools     []goai.Tool
+	engine    *agent.Engine
+	events    chan agentEvent
 	history   []provider.Message
 	modelName string
 	useMemory bool
@@ -199,9 +164,7 @@ func initialModel(ctx context.Context, mcpClient *goaimcp.Client, llmModel provi
 
 	return model{
 		ctx:       ctx,
-		mcpClient: mcpClient,
-		llmModel:  llmModel,
-		tools:     tools,
+		engine:    agent.New(mcpClient, llmModel, tools, modelName),
 		modelName: modelName,
 		useMemory: useMemory,
 		inputHist: loadHistory(),
@@ -302,17 +265,6 @@ func normalizeMarkdownForTerminal(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-func normalizeToolResultText(text string) (clean string, isCached bool, isStored bool) {
-	switch {
-	case strings.HasPrefix(text, "✓ "):
-		return strings.TrimPrefix(text, "✓ "), true, false
-	case strings.HasPrefix(text, "↓ "):
-		return strings.TrimPrefix(text, "↓ "), false, true
-	default:
-		return text, false, false
-	}
-}
-
 func (m *model) appendConversation(role, content string) {
 	if strings.TrimSpace(content) == "" {
 		return
@@ -369,30 +321,6 @@ func (m model) renderFooterMetaLine(width int) string {
 
 	line := strings.Join(parts, footerSeparatorStyle.Render("  "))
 	return lipgloss.NewStyle().MaxWidth(width).Render(line)
-}
-
-func summarizeToolCalls(toolCalls []provider.ToolCall) string {
-	if len(toolCalls) == 0 {
-		return "Waiting for assistant response..."
-	}
-
-	names := make([]string, 0, len(toolCalls))
-	for _, tc := range toolCalls {
-		if tc.Name != "" {
-			names = append(names, tc.Name)
-		}
-	}
-
-	switch len(names) {
-	case 0:
-		return fmt.Sprintf("Running %d tool call(s)...", len(toolCalls))
-	case 1:
-		return fmt.Sprintf("Running `%s`...", names[0])
-	case 2:
-		return fmt.Sprintf("Running `%s` and `%s`...", names[0], names[1])
-	default:
-		return fmt.Sprintf("Running %d tool calls (%s, %s, ...)...", len(names), names[0], names[1])
-	}
 }
 
 func (m *model) pushInputHistory(input string) {
@@ -502,6 +430,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if input == "" {
 				return m, nil
 			}
+			// A turn is already in flight; ignore input until it settles so
+			// we don't start overlapping turns against the same history.
+			if m.isThinking {
+				return m, nil
+			}
 
 			// Handle /memory command
 			if input == "/memory" {
@@ -512,7 +445,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, systemStyle.Render(msg))
 					m.appendConversation("system", msg)
 				} else {
-					hist := renderHistoryText(m.history)
+					hist := agent.RenderHistoryText(m.history)
 					if hist == "" {
 						hist = "(empty)"
 					}
@@ -552,7 +485,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "Analyzing request..."
 			m.refreshViewport(true)
 
-			return m, m.generateResponse()
+			return m, m.startTurn()
 		}
 
 	case tea.WindowSizeMsg:
@@ -580,92 +513,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, spCmd = m.spinner.Update(msg)
 		return m, spCmd
 
-	case llmResponseMsg:
-		if msg.result == nil {
-			m.err = errors.New("LLM returned no response")
+	case agentEvent:
+		if msg.done {
+			m.history = msg.result.History
+			m.lastInput = ""
 			m.isThinking = false
 			m.statusText = ""
-			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			if msg.result.Err != nil {
+				m.err = msg.result.Err
+				m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			}
 			m.refreshViewport(false)
 			return m, nil
 		}
 
-		result := msg.result
-
-		// Append assistant turn to history.
-		m.history = append(m.history, result.ResponseMessages...)
-
-		respText := result.Text
-		toolCalls := result.ToolCalls
-
-		// Detect stalling (model narrates instead of calling tools).
-		content := strings.ToLower(respText)
-		if len(toolCalls) == 0 && (strings.Contains(content, "i will") ||
-			strings.Contains(content, "let me") ||
-			strings.Contains(content, "now i'll") ||
-			strings.Contains(content, "searching")) {
-
-			m.history = append(m.history, goai.UserMessage("Please proceed with the tool call immediately. Do not narrate your intent."))
-			return m, m.generateResponse()
-		}
-
-		// Display text content.
-		if respText != "" && len(toolCalls) == 0 {
-			rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(respText))
-			if err != nil {
-				rendered = respText
-			}
-			m.messages = append(m.messages, fmt.Sprintf("%s\n%s", assistantStyle.Render("Assistant:"), rendered))
-			m.appendConversation("assistant", respText)
-		}
-
-		// Handle tool calls.
-		if len(toolCalls) > 0 {
-			m.statusText = summarizeToolCalls(toolCalls) + " Tool lines above are intermediate."
-			for _, tc := range toolCalls {
-				header := toolStyle.Render(fmt.Sprintf("[%s] args:", tc.Name))
-				body := toolJSONStyle.Copy().Width(m.viewport.Width).Render(formatToolCallArguments(tc))
-				m.messages = append(m.messages, header+"\n"+body+"\n")
-			}
-			m.refreshViewport(false)
-			return m, m.executeTools(toolCalls)
-		}
-
-		m.lastInput = ""
-		m.isThinking = false
-		m.statusText = ""
-		m.refreshViewport(false)
-		return m, nil
-
-	case toolsResultMsg:
-		for _, res := range msg.results {
-			m.history = append(m.history, res)
-		}
-		for _, outcome := range msg.outcomes {
-			m.toolCalls++
-			if outcome.isCached {
-				m.cacheHits++
-			} else {
-				m.cacheMisses++
-			}
-			if outcome.isStored {
-				m.cacheStores++
-			}
-			if outcome.isError {
-				m.toolErrors++
-			}
-		}
-		m.statusText = "Tool results received. Drafting final answer..."
-		m.refreshViewport(false)
-		return m, m.generateResponse()
-
-	case errMsg:
-		m.err = msg.err
-		m.isThinking = false
-		m.statusText = ""
-		m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-		m.refreshViewport(false)
-		return m, nil
+		m.handleAgentEvent(msg.ev)
+		return m, waitForAgentEvent(m.events)
 	}
 
 	m.textInput, tiCmd = m.textInput.Update(msg)
@@ -802,176 +665,81 @@ func stopServer(mcpClient *goaimcp.Client) {
 	mcpClient.Close()
 }
 
-func extractToolText(toolResp *goaimcp.CallToolResult) string {
-	if toolResp == nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, block := range toolResp.Content {
-		if tc, ok := goaimcp.ParseTextContent(block); ok {
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(tc.Text)
-		}
-	}
-	return sb.String()
-}
+// startTurn kicks off the shared agent.Engine in a background goroutine and
+// returns a Cmd that waits for the first Event it produces. The goroutine
+// pushes each Event onto m.events as it happens (tool call started, tool
+// call finished, status update, final assistant text) so the TUI can render
+// progress incrementally instead of waiting for the whole turn — matching
+// what internal/webui/server.go already does over the WebSocket, just
+// bridged through a channel since Bubble Tea's Update loop must stay
+// single-threaded and a Cmd can only return one message at a time.
+func (m *model) startTurn() tea.Cmd {
+	ch := make(chan agentEvent, 16)
+	m.events = ch
 
-func renderHistoryText(history []provider.Message) string {
-	var sb strings.Builder
-	for _, msg := range history {
-		for _, p := range msg.Content {
-			if p.Type == provider.PartText && p.Text != "" {
-				role := "Human"
-				if msg.Role == provider.RoleAssistant {
-					role = "AI"
-				}
-				sb.WriteString(fmt.Sprintf("%s: %s\n", role, p.Text))
-			}
-		}
-	}
-	return sb.String()
-}
+	ctx := m.ctx
+	eng := m.engine
+	history := m.history
 
-func summarizeHistoryForLog(history []provider.Message) string {
-	type partSummary map[string]any
-	type messageSummary map[string]any
-
-	summary := make([]messageSummary, 0, len(history))
-	for i, msg := range history {
-		var parts []partSummary
-		for _, p := range msg.Content {
-			switch p.Type {
-			case provider.PartText:
-				parts = append(parts, partSummary{
-					"type":    "text",
-					"chars":   len(p.Text),
-					"preview": util.TruncateForLog(p.Text, 160),
-				})
-			case provider.PartToolCall:
-				parts = append(parts, partSummary{
-					"type":      "tool_call",
-					"name":      p.ToolName,
-					"id":        p.ToolCallID,
-					"arg_chars": len(p.ToolInput),
-					"args":      util.TruncateForLog(string(p.ToolInput), 240),
-				})
-			case provider.PartToolResult:
-				parts = append(parts, partSummary{
-					"type":         "tool_result",
-					"tool_call_id": p.ToolCallID,
-					"chars":        len(p.ToolOutput),
-					"preview":      util.TruncateForLog(p.ToolOutput, 240),
-				})
-			}
-		}
-		summary = append(summary, messageSummary{
-			"index": i,
-			"role":  string(msg.Role),
-			"parts": parts,
+	go func() {
+		result := eng.Turn(ctx, history, func(ev agent.Event) {
+			ch <- agentEvent{ev: ev}
 		})
-	}
-	b, err := json.Marshal(summary)
-	if err != nil {
-		return fmt.Sprintf("failed to summarize history: %v", err)
-	}
-	return string(b)
+		ch <- agentEvent{done: true, result: result}
+		close(ch)
+	}()
+
+	return waitForAgentEvent(ch)
 }
 
-func (m model) generateResponse() tea.Cmd {
+func waitForAgentEvent(ch chan agentEvent) tea.Cmd {
 	return func() tea.Msg {
-		slog.Debug("LLM request summary",
-			"model", m.modelName,
-			"tool_count", len(m.tools),
-			"message_count", len(m.history),
-			"summary", summarizeHistoryForLog(m.history),
-		)
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return ev
+	}
+}
 
-		result, err := util.WithRetry(m.ctx, func() (*goai.TextResult, error) {
-			opts := append(llmobs.Hooks(),
-				goai.WithMessages(m.history...),
-				goai.WithSystem(systemPrompt),
-				goai.WithTools(m.tools...),
-				goai.WithTemperature(0),
-				goai.WithMaxOutputTokens(4096),
-			)
-			return goai.GenerateText(m.ctx, m.llmModel, opts...)
-		})
+// handleAgentEvent renders one incremental agent.Event. It does not touch
+// m.isThinking/m.statusText's terminal state — that's handled by the
+// done-branch in Update once the whole turn finishes.
+func (m *model) handleAgentEvent(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventStatus:
+		m.statusText = ev.Status
+		m.refreshViewport(false)
+
+	case agent.EventToolStart:
+		header := toolStyle.Render(fmt.Sprintf("[%s] args:", ev.Tool.Call.Name))
+		body := toolJSONStyle.Copy().Width(m.viewport.Width).Render(formatToolCallArguments(ev.Tool.Call))
+		m.messages = append(m.messages, header+"\n"+body+"\n")
+		m.refreshViewport(false)
+
+	case agent.EventToolEnd:
+		m.toolCalls++
+		if ev.Tool.IsCached {
+			m.cacheHits++
+		} else {
+			m.cacheMisses++
+		}
+		if ev.Tool.IsStored {
+			m.cacheStores++
+		}
+		if ev.Tool.IsError {
+			m.toolErrors++
+		}
+		m.refreshViewport(false)
+
+	case agent.EventAssistant:
+		rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(ev.Text))
 		if err != nil {
-			slog.Error("LLM generation error", "error", err)
-			return errMsg{err}
+			rendered = ev.Text
 		}
-
-		return llmResponseMsg{result}
-	}
-}
-
-func (m model) executeTools(toolCalls []provider.ToolCall) tea.Cmd {
-	return func() tea.Msg {
-		toolResultMessages := []provider.Message{}
-		outcomes := make([]toolOutcome, 0, len(toolCalls))
-
-		for _, tc := range toolCalls {
-			slog.Info("Executing tool", "name", tc.Name, "arg_chars", len(tc.Input), "id", tc.ID)
-			if util.ClientPayloadLoggingEnabled() {
-				slog.Debug("Tool arguments", "name", tc.Name, "args", util.TruncateForLog(string(tc.Input), maxLoggedPayloadChars))
-			}
-
-			if tc.Name == "" {
-				toolResultMessages = append(toolResultMessages,
-					goai.ToolMessage(tc.ID, tc.Name, "invalid tool call: missing function name"))
-				outcomes = append(outcomes, toolOutcome{isError: true})
-				continue
-			}
-
-			var args map[string]any
-			if len(tc.Input) > 0 {
-				if err := json.Unmarshal(tc.Input, &args); err != nil {
-					toolResultMessages = append(toolResultMessages,
-						goai.ToolMessage(tc.ID, tc.Name, fmt.Sprintf("invalid tool arguments: %v", err)))
-					outcomes = append(outcomes, toolOutcome{isError: true})
-					continue
-				}
-			}
-
-			toolResp, err := m.mcpClient.CallTool(m.ctx, tc.Name, args)
-
-			var resultText string
-			isError := err != nil || (toolResp != nil && toolResp.IsError)
-			switch {
-			case err != nil:
-				slog.Error("Tool call error", "name", tc.Name, "error", err)
-				resultText = fmt.Sprintf("error calling tool: %v", err)
-			case toolResp != nil && toolResp.IsError:
-				resultText = extractToolText(toolResp)
-				if strings.TrimSpace(resultText) == "" {
-					resultText = "tool returned an error"
-				}
-				slog.Warn("Tool returned error status",
-					"name", tc.Name,
-					"error_preview", util.TruncateForLog(resultText, 500),
-				)
-			default:
-				resultText = extractToolText(toolResp)
-				slog.Debug("Tool execution successful",
-					"name", tc.Name,
-					"result_len", len(resultText),
-					"result_preview", util.TruncateForLog(resultText, 500),
-				)
-			}
-
-			resultText, isCached, isStored := normalizeToolResultText(resultText)
-			outcomes = append(outcomes, toolOutcome{
-				isCached: isCached,
-				isStored: isStored,
-				isError:  isError,
-			})
-
-			toolResultMessages = append(toolResultMessages, goai.ToolMessage(tc.ID, tc.Name, resultText))
-		}
-
-		return toolsResultMsg{results: toolResultMessages, outcomes: outcomes}
+		m.messages = append(m.messages, fmt.Sprintf("%s\n%s", assistantStyle.Render("Assistant:"), rendered))
+		m.appendConversation("assistant", ev.Text)
+		m.refreshViewport(false)
 	}
 }
 
@@ -1206,51 +974,19 @@ func runSinglePrompt(modelFlag string, prompt string) {
 
 	history := []provider.Message{goai.UserMessage(prompt)}
 
-	for {
-		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
-			opts := append(llmobs.Hooks(),
-				goai.WithMessages(history...),
-				goai.WithSystem(systemPrompt),
-				goai.WithTools(tools...),
-			)
-			return goai.GenerateText(ctx, llmModel, opts...)
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
-			stopServer(mcpClient)
-			os.Exit(1)
+	eng := agent.New(mcpClient, llmModel, tools, modelName)
+	result := eng.Turn(ctx, history, func(ev agent.Event) {
+		switch ev.Kind {
+		case agent.EventToolStart:
+			fmt.Printf("Calling tool: %s\n", ev.Tool.Call.Name)
+		case agent.EventAssistant:
+			fmt.Println(ev.Text)
 		}
-
-		history = append(history, result.ResponseMessages...)
-
-		if result.Text != "" {
-			fmt.Println(result.Text)
-		}
-
-		if len(result.ToolCalls) == 0 {
-			break
-		}
-
-		for _, tc := range result.ToolCalls {
-			fmt.Printf("Calling tool: %s\n", tc.Name)
-
-			var args map[string]any
-			if len(tc.Input) > 0 {
-				if err := json.Unmarshal(tc.Input, &args); err != nil {
-					history = append(history, goai.ToolMessage(tc.ID, tc.Name, fmt.Sprintf("invalid arguments: %v", err)))
-					continue
-				}
-			}
-
-			toolResp, err := mcpClient.CallTool(ctx, tc.Name, args)
-			resultText := ""
-			if err != nil {
-				resultText = fmt.Sprintf("error: %v", err)
-			} else {
-				resultText = extractToolText(toolResp)
-			}
-			history = append(history, goai.ToolMessage(tc.ID, tc.Name, resultText))
-		}
+	})
+	if result.Err != nil {
+		fmt.Fprintf(os.Stderr, "Generation error: %v\n", result.Err)
+		stopServer(mcpClient)
+		os.Exit(1)
 	}
 }
 

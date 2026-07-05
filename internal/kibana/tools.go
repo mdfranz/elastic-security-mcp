@@ -43,16 +43,9 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "kibana_api_request",
 		Description: "Execute an arbitrary HTTP request against the Kibana REST API. Useful for endpoints not covered by other tools, such as saved objects, spaces, alerting connectors, or custom Kibana configurations.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args KibanaAPIRequestArgs) (res *mcp.CallToolResult, extra any, err error) {
-		method := strings.ToUpper(strings.TrimSpace(args.Method))
-		if method == "" {
-			method = "GET"
-		}
-		path := strings.TrimSpace(args.Path)
-		if path == "" {
-			return nil, nil, fmt.Errorf("path is required")
-		}
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
+		method, path, err := normalizeKibanaAPIRequest(args)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		if args.Body != nil {
@@ -94,17 +87,7 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "list_detection_rules",
 		Description: "Retrieve a list of detection engine rules from the Elastic Security app, including their enabled status.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListDetectionRulesArgs) (res *mcp.CallToolResult, extra any, err error) {
-		path := "/api/detection_engine/rules/_find"
-		var params []string
-		if args.Page > 0 {
-			params = append(params, fmt.Sprintf("page=%d", args.Page))
-		}
-		if args.PerPage > 0 {
-			params = append(params, fmt.Sprintf("per_page=%d", args.PerPage))
-		}
-		if len(params) > 0 {
-			path += "?" + strings.Join(params, "&")
-		}
+		path := buildListDetectionRulesPath(args)
 
 		slog.Info("list_detection_rules called", "page", args.Page, "per_page", args.PerPage, "path", path)
 		start := time.Now()
@@ -123,15 +106,9 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "get_detection_rule",
 		Description: "Get details of a specific Elastic Security detection engine rule by its ID (internal saved object ID) or rule_id (user-defined unique ID). Provide at least one.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args GetDetectionRuleArgs) (res *mcp.CallToolResult, extra any, err error) {
-		if args.Id == "" && args.RuleId == "" {
-			return nil, nil, fmt.Errorf("either id or rule_id must be provided")
-		}
-
-		path := "/api/detection_engine/rules"
-		if args.Id != "" {
-			path += "?id=" + url.QueryEscape(args.Id)
-		} else {
-			path += "?rule_id=" + url.QueryEscape(args.RuleId)
+		path, err := buildGetDetectionRulePath(args)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		slog.Info("get_detection_rule called", "id", args.Id, "rule_id", args.RuleId, "path", path)
@@ -151,20 +128,7 @@ func RegisterTools(server *mcp.Server, client *Client) {
 		Name:        "list_agents",
 		Description: "Retrieve Elastic Agents from Fleet using the Kibana Fleet API.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListAgentsArgs) (res *mcp.CallToolResult, extra any, err error) {
-		path := "/api/fleet/agents"
-		var params []string
-		if args.Page > 0 {
-			params = append(params, fmt.Sprintf("page=%d", args.Page))
-		}
-		if args.PerPage > 0 {
-			params = append(params, fmt.Sprintf("perPage=%d", args.PerPage))
-		}
-		if args.Kuery != "" {
-			params = append(params, "kuery="+url.QueryEscape(args.Kuery))
-		}
-		if len(params) > 0 {
-			path += "?" + strings.Join(params, "&")
-		}
+		path := buildListAgentsPath(args)
 
 		slog.Info("list_agents called", "page", args.Page, "perPage", args.PerPage, "kuery", args.Kuery, "path", path)
 		start := time.Now()
@@ -177,6 +141,70 @@ func RegisterTools(server *mcp.Server, client *Client) {
 
 		return formatResponse(respBody, statusCode)
 	})
+}
+
+func normalizeKibanaAPIRequest(args KibanaAPIRequestArgs) (method string, path string, err error) {
+	method = strings.ToUpper(strings.TrimSpace(args.Method))
+	if method == "" {
+		method = "GET"
+	}
+
+	path = strings.TrimSpace(args.Path)
+	if path == "" {
+		return "", "", fmt.Errorf("path is required")
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	return method, path, nil
+}
+
+func buildListDetectionRulesPath(args ListDetectionRulesArgs) string {
+	path := "/api/detection_engine/rules/_find"
+	var params []string
+	if args.Page > 0 {
+		params = append(params, fmt.Sprintf("page=%d", args.Page))
+	}
+	if args.PerPage > 0 {
+		params = append(params, fmt.Sprintf("per_page=%d", args.PerPage))
+	}
+	if len(params) > 0 {
+		path += "?" + strings.Join(params, "&")
+	}
+	return path
+}
+
+func buildGetDetectionRulePath(args GetDetectionRuleArgs) (string, error) {
+	if args.Id == "" && args.RuleId == "" {
+		return "", fmt.Errorf("either id or rule_id must be provided")
+	}
+
+	path := "/api/detection_engine/rules"
+	if args.Id != "" {
+		path += "?id=" + url.QueryEscape(args.Id)
+	} else {
+		path += "?rule_id=" + url.QueryEscape(args.RuleId)
+	}
+	return path, nil
+}
+
+func buildListAgentsPath(args ListAgentsArgs) string {
+	path := "/api/fleet/agents"
+	var params []string
+	if args.Page > 0 {
+		params = append(params, fmt.Sprintf("page=%d", args.Page))
+	}
+	if args.PerPage > 0 {
+		params = append(params, fmt.Sprintf("perPage=%d", args.PerPage))
+	}
+	if args.Kuery != "" {
+		params = append(params, "kuery="+url.QueryEscape(args.Kuery))
+	}
+	if len(params) > 0 {
+		path += "?" + strings.Join(params, "&")
+	}
+	return path
 }
 
 func formatResponse(respBody []byte, statusCode int) (*mcp.CallToolResult, any, error) {

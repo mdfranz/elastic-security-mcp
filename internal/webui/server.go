@@ -9,20 +9,16 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	goai "github.com/zendev-sh/goai"
 	goaimcp "github.com/zendev-sh/goai/mcp"
 	"github.com/zendev-sh/goai/provider"
 	"github.com/gorilla/websocket"
-	"github.com/mfranz/elastic-security-mcp/internal/llmobs"
-	"github.com/mfranz/elastic-security-mcp/internal/util"
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
 )
 
 //go:embed assets/*
 var assets embed.FS
-
-const maxLoggedPayloadChars = 4000
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -60,18 +56,14 @@ type ToolEvent struct {
 }
 
 type Server struct {
-	mcpClient *goaimcp.Client
-	llmModel  provider.LanguageModel
-	tools     []goai.Tool
+	engine    *agent.Engine
 	modelName string
 	useMemory bool
 }
 
 func RunServer(ctx context.Context, mcpClient *goaimcp.Client, model provider.LanguageModel, tools []goai.Tool, modelName string, port int, useMemory bool) error {
 	s := &Server{
-		mcpClient: mcpClient,
-		llmModel:  model,
-		tools:     tools,
+		engine:    agent.New(mcpClient, model, tools, modelName),
 		modelName: modelName,
 		useMemory: useMemory,
 	}
@@ -133,7 +125,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if !s.useMemory {
 					s.sendMessage(conn, WebMessage{Type: "system", Content: "Conversation memory is disabled."})
 				} else {
-					hist := renderHistoryText(history)
+					hist := agent.RenderHistoryText(history)
 					if hist == "" {
 						hist = "(empty)"
 					}
@@ -145,144 +137,48 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.sendMessage(conn, WebMessage{Type: "user", Content: userInput})
 			history = append(history, goai.UserMessage(userInput))
 
-			s.processConversation(r.Context(), conn, &history, userInput)
+			s.processConversation(r.Context(), conn, &history)
 		}
 	}
 }
 
-func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]provider.Message, lastUserInput string) {
-	for {
-		s.sendMessage(conn, WebMessage{Type: "status", Content: "Analyzing request...", Thinking: true})
+func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]provider.Message) {
+	result := s.engine.Turn(ctx, *history, func(ev agent.Event) {
+		s.emitEvent(conn, ev)
+	})
+	*history = result.History
 
-		result, err := util.WithRetry(ctx, func() (*goai.TextResult, error) {
-			opts := append(llmobs.Hooks(),
-				goai.WithMessages(*history...),
-				goai.WithSystem(systemPrompt),
-				goai.WithTools(s.tools...),
-				goai.WithTemperature(0),
-				goai.WithMaxOutputTokens(4096),
-			)
-			return goai.GenerateText(ctx, s.llmModel, opts...)
+	if result.Err != nil {
+		s.sendMessage(conn, WebMessage{Type: "error", Content: fmt.Sprintf("LLM error: %v", result.Err)})
+	}
+	s.sendMessage(conn, WebMessage{Type: "clear_status"})
+}
+
+// emitEvent translates an agent.Event into the WebSocket protocol, streaming
+// a "running" tool message before each call and a "completed"/"error" one
+// after, so the browser sees live per-tool progress.
+func (s *Server) emitEvent(conn *websocket.Conn, ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventStatus:
+		s.sendMessage(conn, WebMessage{Type: "status", Content: ev.Status, Thinking: true})
+	case agent.EventToolStart, agent.EventToolEnd:
+		t := ev.Tool
+		s.sendMessage(conn, WebMessage{
+			Type: "tool",
+			Tool: &ToolEvent{
+				ID:       t.Call.ID,
+				Seq:      t.Seq,
+				Name:     t.Call.Name,
+				State:    t.State,
+				Args:     t.Args,
+				Result:   t.Result,
+				IsError:  t.IsError,
+				IsCached: t.IsCached,
+				IsStored: t.IsStored,
+			},
 		})
-
-		if err != nil {
-			s.sendMessage(conn, WebMessage{Type: "error", Content: fmt.Sprintf("LLM error: %v", err)})
-			s.sendMessage(conn, WebMessage{Type: "clear_status"})
-			return
-		}
-
-		// Append assistant turn to history.
-		*history = append(*history, result.ResponseMessages...)
-
-		respText := result.Text
-		toolCalls := result.ToolCalls
-
-		// Detect stalling (model narrates instead of calling tools).
-		content := strings.ToLower(respText)
-		if len(toolCalls) == 0 && (strings.Contains(content, "i will") ||
-			strings.Contains(content, "let me") ||
-			strings.Contains(content, "now i'll") ||
-			strings.Contains(content, "searching")) {
-
-			*history = append(*history, goai.UserMessage("Please proceed with the tool call immediately. Do not narrate your intent."))
-			continue
-		}
-
-		if respText != "" && len(toolCalls) == 0 {
-			s.sendMessage(conn, WebMessage{Type: "assistant", Content: respText})
-		}
-
-		if len(toolCalls) > 0 {
-			s.sendMessage(conn, WebMessage{Type: "status", Content: summarizeToolCalls(toolCalls), Thinking: true})
-
-			for i, tc := range toolCalls {
-				var args map[string]any
-				if len(tc.Input) > 0 {
-					if err := json.Unmarshal(tc.Input, &args); err != nil {
-						slog.Warn("Failed to unmarshal tool arguments", "error", err, "name", tc.Name)
-						args = make(map[string]any)
-					}
-				}
-
-				toolEvent := &ToolEvent{
-					ID:    tc.ID,
-					Seq:   i + 1,
-					Name:  tc.Name,
-					State: "running",
-					Args:  args,
-				}
-				s.sendMessage(conn, WebMessage{Type: "tool", Tool: toolEvent})
-
-				slog.Info("Executing tool", "name", tc.Name, "arg_chars", len(tc.Input), "id", tc.ID)
-				if util.ClientPayloadLoggingEnabled() {
-					slog.Debug("Tool arguments", "name", tc.Name, "args", util.TruncateForLog(string(tc.Input), maxLoggedPayloadChars))
-				}
-
-				start := time.Now()
-				toolResp, callErr := s.mcpClient.CallTool(ctx, tc.Name, args)
-				latencyMs := time.Since(start).Milliseconds()
-
-				resultText := ""
-				isError := callErr != nil || (toolResp != nil && toolResp.IsError)
-				if callErr != nil {
-					resultText = fmt.Sprintf("error: %v", callErr)
-					slog.Error("Tool call error", "name", tc.Name, "latency_ms", latencyMs, "error", callErr)
-				} else {
-					resultText = extractToolText(toolResp)
-					if toolResp != nil && toolResp.IsError {
-						slog.Warn("Tool returned error status",
-							"name", tc.Name,
-							"latency_ms", latencyMs,
-							"error_preview", util.TruncateForLog(resultText, 500),
-						)
-					} else {
-						slog.Debug("Tool execution successful",
-							"name", tc.Name,
-							"latency_ms", latencyMs,
-							"result_len", len(resultText),
-							"result_preview", util.TruncateForLog(resultText, 500),
-						)
-					}
-				}
-
-				isCached := false
-				isStored := false
-				if strings.HasPrefix(resultText, "✓ ") {
-					isCached = true
-					resultText = strings.TrimPrefix(resultText, "✓ ")
-				} else if strings.HasPrefix(resultText, "↓ ") {
-					isStored = true
-					resultText = strings.TrimPrefix(resultText, "↓ ")
-				}
-
-				finalState := "completed"
-				if isError {
-					finalState = "error"
-				}
-				s.sendMessage(conn, WebMessage{
-					Type: "tool",
-					Tool: &ToolEvent{
-						ID:       tc.ID,
-						Seq:      i + 1,
-						Name:     tc.Name,
-						State:    finalState,
-						Args:     args,
-						Result:   resultText,
-						IsError:  isError,
-						IsCached: isCached,
-						IsStored: isStored,
-					},
-				})
-
-				*history = append(*history, goai.ToolMessage(tc.ID, tc.Name, resultText))
-			}
-
-			s.sendMessage(conn, WebMessage{Type: "status", Content: "Tool results received. Drafting final answer...", Thinking: true})
-			continue
-		}
-
-		s.sendMessage(conn, WebMessage{Type: "clear_status"})
-		break
+	case agent.EventAssistant:
+		s.sendMessage(conn, WebMessage{Type: "assistant", Content: ev.Text})
 	}
 }
 
@@ -295,72 +191,4 @@ func (s *Server) sendMessage(conn *websocket.Conn, msg WebMessage) {
 	if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
 		slog.Error("Failed to write message", "error", err, "type", msg.Type)
 	}
-}
-
-const systemPrompt = `You are a silent Elastic Security analyst tool.
-YOUR ONLY JOB IS TO CALL TOOLS.
-NEVER explain what you are doing.
-NEVER say "I will search" or "Let me check" or "Now I'll".
-IF YOU NEED DATA, CALL THE APPROPRIATE SEARCH OR LOOKUP TOOL IMMEDIATELY.
-DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
-ALWAYS use Markdown tables for tabular data.
-
-TOOL SELECTION GUIDE — call the right tool immediately:
-- search_security_alerts: detection alerts from Elastic Security rules
-- search_processes: endpoint process events (automatically searches logs-endpoint.events.process-*)
-- search_security_events: network and endpoint events — use index logs-zeek.*-* for Zeek, logs-suricata.*-* for Suricata, packetbeat-* for Packetbeat, logs-endpoint.events.network-* or logs-endpoint.events.file-* for endpoint
-- list_indices: discover available indices before searching if unsure
-- list_kibana_spaces: discover or list available Kibana spaces
-- list_detection_rules / get_detection_rule: inspect or browse detection rules
-- list_agents: check Elastic Agent / Fleet status
-- lookup_domain / lookup_ip: fast DNS history lookup from cache
-- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
-- kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
-
-func summarizeToolCalls(toolCalls []provider.ToolCall) string {
-	if len(toolCalls) == 0 {
-		return "Waiting for assistant response..."
-	}
-	names := make([]string, 0, len(toolCalls))
-	for _, tc := range toolCalls {
-		if tc.Name != "" {
-			names = append(names, tc.Name)
-		}
-	}
-	if len(names) == 0 {
-		return fmt.Sprintf("Running %d tool call(s)...", len(toolCalls))
-	}
-	return fmt.Sprintf("Running %s...", strings.Join(names, ", "))
-}
-
-func extractToolText(toolResp *goaimcp.CallToolResult) string {
-	if toolResp == nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, block := range toolResp.Content {
-		if tc, ok := goaimcp.ParseTextContent(block); ok {
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(tc.Text)
-		}
-	}
-	return sb.String()
-}
-
-func renderHistoryText(history []provider.Message) string {
-	var sb strings.Builder
-	for _, msg := range history {
-		for _, p := range msg.Content {
-			if p.Type == provider.PartText && p.Text != "" {
-				role := "Human"
-				if msg.Role == provider.RoleAssistant {
-					role = "AI"
-				}
-				sb.WriteString(fmt.Sprintf("%s: %s\n", role, p.Text))
-			}
-		}
-	}
-	return sb.String()
 }

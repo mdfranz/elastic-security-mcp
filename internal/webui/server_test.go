@@ -10,13 +10,13 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/zendev-sh/goai/provider"
+
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
 )
 
 func setupTestServer() *Server {
 	return &Server{
-		mcpClient: nil,
-		llmModel:  nil,
-		tools:     nil,
+		engine:    agent.New(nil, nil, nil, "test-model"),
 		modelName: "test-model",
 		useMemory: false,
 	}
@@ -169,58 +169,8 @@ func TestToolEventSerialization(t *testing.T) {
 	}
 }
 
-func TestSummarizeToolCalls(t *testing.T) {
-	tests := []struct {
-		name      string
-		toolCalls []provider.ToolCall
-		wantWords []string
-	}{
-		{
-			name:      "Empty tool calls",
-			toolCalls: []provider.ToolCall{},
-			wantWords: []string{"Waiting"},
-		},
-		{
-			name: "Single tool call",
-			toolCalls: []provider.ToolCall{
-				{Name: "search"},
-			},
-			wantWords: []string{"Running", "search"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := summarizeToolCalls(tt.toolCalls)
-			for _, word := range tt.wantWords {
-				if !strings.Contains(result, word) {
-					t.Errorf("Expected %q to contain %q", result, word)
-				}
-			}
-		})
-	}
-}
-
-func TestExtractToolText(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-	}{
-		{
-			name: "Nil response",
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractToolText(nil)
-			if result != tt.want {
-				t.Errorf("extractToolText(nil) = %q, want %q", result, tt.want)
-			}
-		})
-	}
-}
+// summarizeToolCalls and extractToolText moved to internal/agent; see
+// TestSummarizeToolCalls and TestExtractToolText there.
 
 func TestConversationHistoryInitialization(t *testing.T) {
 	history := []provider.Message{}
