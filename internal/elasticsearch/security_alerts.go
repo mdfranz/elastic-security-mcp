@@ -22,7 +22,6 @@ var alertsSourceIncludes = []string{
 	"kibana.alert.rule.parameters.severity",
 	"kibana.alert.rule.parameters.risk_score",
 	"kibana.alert.rule.parameters.description",
-	"agent.id",
 	"host.name",
 	"process.name",
 	"process.executable",
@@ -60,7 +59,7 @@ func RegisterSecurityAlertsTool(server *mcp.Server, es *Client, cache *ToolCache
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_security_alerts",
-		Description: "Search Elastic Security detection alerts stored in .alerts-security.alerts-* indices.",
+		Description: "Search Elastic Security detection alerts stored in .alerts-security.alerts-* indices. All filters are optional and combine as AND — calling with no filters returns the most recent alerts, sorted by @timestamp descending. severity and rule_name are matched as exact terms (rule_name supports wildcards, e.g. *Malware*); query is a free-text query_string search.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityAlertsArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_security_alerts", &err)
 		normalized := normalizeSecurityAlertsArgs(args)
@@ -183,13 +182,12 @@ func shapeSecurityAlertsResponse(resp *typedsearch.Response) (map[string]interfa
 		severity := firstString(compactSource, "kibana.alert.rule.parameters.severity")
 
 		out := map[string]interface{}{
-			"_index":     hit.Index_,
-			"_id":        valueOrEmpty(hit.Id_),
-			"timestamp":  timestamp,
-			"rule_name":  ruleName,
-			"severity":   severity,
-			"message":    message,
-			"source":     compactSource,
+			"_id":       valueOrEmpty(hit.Id_),
+			"timestamp": timestamp,
+			"rule_name": ruleName,
+			"severity":  severity,
+			"message":   message,
+			"source":    compactSource,
 		}
 		hits = append(hits, out)
 	}

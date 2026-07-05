@@ -28,9 +28,23 @@ func NewToolCache() *ToolCache {
 	enabled := CacheEnabled()
 	var client *redis.Client
 	if enabled {
+		addr := RedisAddr()
 		client = redis.NewClient(&redis.Options{
-			Addr: RedisAddr(),
+			Addr:        addr,
+			DialTimeout: 2 * time.Second,
+			ReadTimeout: 2 * time.Second,
 		})
+		// Verify connectivity at startup
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := client.Ping(ctx).Err(); err != nil {
+			slog.Warn("Failed to connect to Redis cache; caching will be disabled", "addr", addr, "error", err)
+			enabled = false
+			client.Close()
+			client = nil
+		} else {
+			slog.Info("Connected to Redis cache", "addr", addr)
+		}
 	}
 	return &ToolCache{
 		client:  client,
@@ -159,8 +173,9 @@ func WrapWithCache[A any](
 		if text, ok := cache.Get(ctx, key); ok {
 			slog.Info("cache hit", "tool", toolName, "key_prefix", key[:8])
 			return &mcp.CallToolResult{
+				Meta: mcp.Meta{"cache_status": "hit"},
 				Content: []mcp.Content{
-					&mcp.TextContent{Text: "✓ " + text},
+					&mcp.TextContent{Text: text},
 				},
 			}, nil, nil
 		}
@@ -175,7 +190,10 @@ func WrapWithCache[A any](
 			if txt, ok := result.Content[0].(*mcp.TextContent); ok {
 				cache.Set(ctx, key, txt.Text, ttl)
 				slog.Info("cache stored", "tool", toolName, "key_prefix", key[:8], "ttl_secs", int(ttl.Seconds()))
-				txt.Text = "↓ " + txt.Text
+				if result.Meta == nil {
+					result.Meta = mcp.Meta{}
+				}
+				result.Meta["cache_status"] = "stored"
 			}
 		}
 		return result, extra, nil
