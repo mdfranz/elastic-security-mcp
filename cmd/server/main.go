@@ -72,13 +72,13 @@ func main() {
 	slog.Info("Server acquired lock", "file", lockFile, "pid", os.Getpid())
 
 	// 2. Environment Variables
-	elasticURL := os.Getenv("ELASTIC_URL")
-	elasticKey := os.Getenv("ELASTIC_KEY")
+	elasticURL := os.ExpandEnv(os.Getenv("ELASTIC_URL"))
+	elasticKey := os.ExpandEnv(os.Getenv("ELASTIC_KEY"))
 
-	kibanaURL := os.Getenv("KIBANA_URL")
-	kibanaUser := os.Getenv("KIBANA_USER")
-	kibanaPass := os.Getenv("KIBANA_PASS")
-	kibanaKey := os.Getenv("KIBANA_KEY")
+	kibanaURL := os.ExpandEnv(os.Getenv("KIBANA_URL"))
+	kibanaUser := os.ExpandEnv(os.Getenv("KIBANA_USER"))
+	kibanaPass := os.ExpandEnv(os.Getenv("KIBANA_PASS"))
+	kibanaKey := os.ExpandEnv(os.Getenv("KIBANA_KEY"))
 
 	if elasticURL == "" || elasticKey == "" {
 		slog.Error("ELASTIC_URL and ELASTIC_KEY environment variables must be set")

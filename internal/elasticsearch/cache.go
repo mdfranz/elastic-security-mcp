@@ -28,9 +28,23 @@ func NewToolCache() *ToolCache {
 	enabled := CacheEnabled()
 	var client *redis.Client
 	if enabled {
+		addr := RedisAddr()
 		client = redis.NewClient(&redis.Options{
-			Addr: RedisAddr(),
+			Addr:        addr,
+			DialTimeout: 2 * time.Second,
+			ReadTimeout: 2 * time.Second,
 		})
+		// Verify connectivity at startup
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := client.Ping(ctx).Err(); err != nil {
+			slog.Warn("Failed to connect to Redis cache; caching will be disabled", "addr", addr, "error", err)
+			enabled = false
+			client.Close()
+			client = nil
+		} else {
+			slog.Info("Connected to Redis cache", "addr", addr)
+		}
 	}
 	return &ToolCache{
 		client:  client,
@@ -86,6 +100,9 @@ func cacheKey(toolName string, args any) (string, error) {
 }
 
 func (c *ToolCache) Get(ctx context.Context, key string) (string, bool) {
+	if c.client == nil {
+		return "", false
+	}
 	val, err := c.client.Get(ctx, key).Result()
 	if err == nil {
 		return val, true
@@ -97,6 +114,9 @@ func (c *ToolCache) Get(ctx context.Context, key string) (string, bool) {
 }
 
 func (c *ToolCache) Set(ctx context.Context, key, text string, ttl time.Duration) {
+	if c.client == nil {
+		return
+	}
 	if err := c.client.Set(ctx, key, text, ttl).Err(); err != nil {
 		slog.Warn("redis set error", "error", err)
 	}
@@ -159,6 +179,7 @@ func WrapWithCache[A any](
 		if text, ok := cache.Get(ctx, key); ok {
 			slog.Info("cache hit", "tool", toolName, "key_prefix", key[:8])
 			return &mcp.CallToolResult{
+				Meta: mcp.Meta{"cache_status": "hit"},
 				Content: []mcp.Content{
 					&mcp.TextContent{Text: "✓ " + text},
 				},
@@ -175,6 +196,10 @@ func WrapWithCache[A any](
 			if txt, ok := result.Content[0].(*mcp.TextContent); ok {
 				cache.Set(ctx, key, txt.Text, ttl)
 				slog.Info("cache stored", "tool", toolName, "key_prefix", key[:8], "ttl_secs", int(ttl.Seconds()))
+				if result.Meta == nil {
+					result.Meta = mcp.Meta{}
+				}
+				result.Meta["cache_status"] = "stored"
 				txt.Text = "↓ " + txt.Text
 			}
 		}

@@ -15,10 +15,10 @@ import (
 )
 
 type SearchProcessesArgs struct {
-	Executable  string `json:"executable,omitempty" jsonschema:"Optional exact executable path to filter (e.g., /usr/lib/systemd/systemd-executor)"`
-	CommandLine string `json:"command_line,omitempty" jsonschema:"Optional command line substring to filter (e.g., systemd-executor --deserialize)"`
-	ProcessName string `json:"process_name,omitempty" jsonschema:"Optional process name to filter (e.g., systemd-executor)"`
-	ParentName  string `json:"parent_name,omitempty" jsonschema:"Optional parent process name to filter (e.g., systemd)"`
+	Executable  string `json:"executable,omitempty" jsonschema:"Optional exact executable path to filter (e.g., /usr/lib/systemd/systemd-executor). Exact match only — wildcards are not supported."`
+	CommandLine string `json:"command_line,omitempty" jsonschema:"Optional command line text to filter (e.g., systemd-executor --deserialize). Matched as analyzed tokens (OR by default), not a literal substring — a partial word won't match."`
+	ProcessName string `json:"process_name,omitempty" jsonschema:"Optional process name to filter (e.g., systemd-executor). Exact match only — wildcards are not supported."`
+	ParentName  string `json:"parent_name,omitempty" jsonschema:"Optional parent process name to filter (e.g., systemd). Exact match only — wildcards are not supported."`
 	User        string `json:"user,omitempty" jsonschema:"Optional username to filter (e.g., clickhouse)"`
 	PID         int    `json:"pid,omitempty" jsonschema:"Optional exact process ID to filter"`
 	ParentPID   int    `json:"parent_pid,omitempty" jsonschema:"Optional exact parent process ID to filter"`
@@ -55,7 +55,8 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
 	}
 
-	ctx = ensureSearchTimeout(ctx)
+	ctx, cancel := ensureSearchTimeout(ctx)
+	defer cancel()
 	slog.Info("search_processes called",
 		"executable", args.Executable,
 		"command_line", args.CommandLine,
@@ -201,7 +202,6 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 			"group.id",
 			"host.name",
 			"host.id",
-			"agent.id",
 			"event.action",
 			"event.outcome",
 		},

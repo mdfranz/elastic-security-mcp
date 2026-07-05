@@ -25,6 +25,10 @@ type SearchArgs struct {
 	Query any    `json:"query" jsonschema:"The Elasticsearch JSON query DSL string or object"`
 }
 
+type ClusterHealthArgs struct {
+	Level string `json:"level,omitempty" jsonschema:"Optional detail level: cluster (default), indices, or shards"`
+}
+
 type LookupDomainArgs struct {
 	Domain string `json:"domain" jsonschema:"The exact domain name to look up (e.g. connectivity-check.ubuntu.com)"`
 }
@@ -35,6 +39,8 @@ type LookupIPArgs struct {
 
 var maxResponseChars int
 var defaultToolTimeout time.Duration
+var exportToolTimeout time.Duration
+var exportBatchTimeout time.Duration
 
 func init() {
 	maxResponseChars = 20000
@@ -49,19 +55,46 @@ func init() {
 			defaultToolTimeout = time.Duration(secs) * time.Second
 		}
 	}
+	exportToolTimeout = 30 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("EXPORT_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			exportToolTimeout = time.Duration(secs) * time.Second
+		}
+	}
+	exportBatchTimeout = 180 * time.Second
+	if v := strings.TrimSpace(os.Getenv("EXPORT_BATCH_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			exportBatchTimeout = time.Duration(secs) * time.Second
+		}
+	}
 }
 
 func MaxResponseChars() int {
 	return maxResponseChars
 }
 
-func ensureToolTimeout(ctx context.Context) context.Context {
+func ensureToolTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultToolTimeout)
-		_ = cancel
+		return context.WithTimeout(ctx, defaultToolTimeout)
 	}
-	return ctx
+	return ctx, func() {}
+}
+
+// ensureExportTimeout applies a much longer timeout than other tools, since an
+// export paginates through potentially tens of thousands of rows in one call.
+func ensureExportTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); !ok {
+		return context.WithTimeout(ctx, exportToolTimeout)
+	}
+	return ctx, func() {}
+}
+
+// ExportBatchTimeout returns the per-scroll-batch timeout for exports. This is
+// deliberately much shorter than the overall export timeout so a single slow or
+// hung Elasticsearch scroll response fails fast with a clear error, rather than
+// silently blocking for up to the full export duration.
+func ExportBatchTimeout() time.Duration {
+	return exportBatchTimeout
 }
 
 func truncateResults(result map[string]interface{}) {
@@ -156,12 +189,14 @@ func normalizeSearchArgs(args SearchArgs) SearchArgs {
 func RegisterTools(server *mcp.Server, es *Client) {
 	cache := NewToolCache()
 	RegisterSecuritySearchTool(server, es, cache)
+	RegisterExportSecurityEventsTool(server, es)
 	RegisterSecurityAlertsTool(server, es, cache)
 	RegisterProcessSearchTool(server, es, cache)
 
 	// Register List Indices Tool
 	listHandler := WrapWithCache(cache, "list_indices", ListIndicesTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (*mcp.CallToolResult, any, error) {
-		ctx = ensureToolTimeout(ctx)
+		ctx, cancel := ensureToolTimeout(ctx)
+		defer cancel()
 		slog.Info("list_indices called", "pattern", args.Pattern)
 
 		opts := []func(*esapi.CatIndicesRequest){
@@ -217,7 +252,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_indices",
-		Description: "List all available Elasticsearch indices",
+		Description: "List available Elasticsearch indices with doc counts, store size, and health. Optionally filter by an index pattern (e.g. logs-zeek.*). Results are cached for up to 1 hour, so very recent index creation/rollover may not show immediately.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListIndicesArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("list_indices", &err)
 		args.Pattern = strings.TrimSpace(args.Pattern)
@@ -226,7 +261,8 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	// Register Search Tool
 	searchHandler := WrapWithCache(cache, "search_elastic", SearchElasticTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
-		ctx = ensureToolTimeout(ctx)
+		ctx, cancel := ensureToolTimeout(ctx)
+		defer cancel()
 		if args.Index == "" {
 			return nil, nil, fmt.Errorf("index is required")
 		}
@@ -237,6 +273,9 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 		slog.Info("search_elastic called", "index", args.Index, "query_chars", len(queryStr))
 		slog.Debug("search_elastic query", "index", args.Index, "query", queryStr)
+		if args.Index == "*" {
+			slog.Warn("search_elastic called with index=\"*\" — this scatter-gathers across every index in the cluster and is much slower than a scoped pattern", "query_chars", len(queryStr))
+		}
 
 		if !json.Valid([]byte(queryStr)) {
 			slog.Warn("invalid query JSON", "index", args.Index, "query_chars", len(queryStr), "query", queryStr)
@@ -257,14 +296,14 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		defer searchRes.Body.Close()
 		if searchRes.IsError() {
 			err := HttpError("search", searchRes)
-			slog.Warn("search request failed", "index", args.Index, "error", err)
 			errMsg := fmt.Sprintf("%v", err)
 
-			// Collapse field not mapped: retry without collapse clause
+			// Collapse field not mapped: retry without collapse clause.
+			// Note: searchRes.Body is already consumed by HttpError above and
+			// will be closed by the deferred close — do not close it again here.
 			if strings.Contains(errMsg, "in order to collapse on") {
-				searchRes.Body.Close()
 				if retryQuery, stripped := withoutCollapse(queryStr); stripped {
-					slog.Info("retrying search_elastic without collapse clause", "index", args.Index)
+					slog.Info("search failed due to collapse mapping; retrying without collapse clause", "index", args.Index)
 					retryRes, retryErr := es.Raw.Search(
 						es.Raw.Search.WithContext(ctx),
 						es.Raw.Search.WithIndex(args.Index),
@@ -287,10 +326,18 @@ func RegisterTools(server *mcp.Server, es *Client) {
 					if retryRes != nil {
 						retryRes.Body.Close()
 					}
+					if retryErr != nil {
+						err = fmt.Errorf("retry failed: %w (original error: %s)", retryErr, errMsg)
+					} else if retryRes != nil && retryRes.IsError() {
+						retryHttpErr := HttpError("search retry", retryRes)
+						err = fmt.Errorf("retry failed: %v (original error: %s)", retryHttpErr, errMsg)
+					}
 				}
 				errMsg += " — the field has no .keyword mapping; use a terms aggregation to deduplicate instead"
+				err = fmt.Errorf("%s", errMsg)
 			}
 
+			slog.Warn("search request failed", "index", args.Index, "error", err)
 			if strings.Contains(errMsg, "all shards failed") {
 				errMsg += " — index may be unhealthy or missing; try list_indices to verify the index exists"
 			}
@@ -303,6 +350,8 @@ func RegisterTools(server *mcp.Server, es *Client) {
 			slog.Error("failed to decode search response", "error", err)
 			return nil, nil, fmt.Errorf("failed to decode search response: %w", err)
 		}
+
+		pruneElasticSearchResult(result)
 
 		// Log summary of results
 		took := result["took"]
@@ -330,17 +379,64 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_elastic",
-		Description: "Search Elasticsearch with a JSON query string or object. Important: 1. Fields containing colons (like MAC addresses) must be quoted in query_string queries (e.g., mac:\"00:11:22*\"). 2. IP fields do not support wildcards; use CIDR notation (e.g., '192.168.1.0/24') or range queries. 3. Prefer search_security_events for common filters as it handles these edge cases automatically.",
+		Description: "Search Elasticsearch with a JSON query string or object. Important: 1. Fields containing colons (like MAC addresses) must be quoted in query_string queries (e.g., mac:\"00:11:22*\"). 2. IP fields do not support wildcards; use CIDR notation (e.g., '192.168.1.0/24') or range queries. 3. Prefer search_security_events for common filters as it handles these edge cases automatically. 4. Scope the index parameter as narrowly as possible (e.g. logs-zeek.dns-*, logs-endpoint.events.process-*); avoid a bare '*', which scatter-gathers the query across every index in the cluster and is typically 5-20x slower — use list_indices first if you're unsure of the right pattern.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_elastic", &err)
 		args = normalizeSearchArgs(args)
 		return searchHandler(ctx, req, args)
 	})
 
+	// Register Cluster Health Tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "cluster_health",
+		Description: "Return Elasticsearch cluster health: status (green/yellow/red), node counts, shard counts, and unassigned shards. Use level=indices or level=shards for more detail.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args ClusterHealthArgs) (res *mcp.CallToolResult, extra any, err error) {
+		defer recoverToolPanic("cluster_health", &err)
+		ctx, cancel := ensureToolTimeout(ctx)
+		defer cancel()
+		slog.Info("cluster_health called", "level", args.Level)
+
+		level := strings.TrimSpace(args.Level)
+		if level == "" {
+			level = "cluster"
+		}
+		if level != "cluster" && level != "indices" && level != "shards" {
+			return nil, nil, fmt.Errorf("invalid level %q: must be cluster, indices, or shards", level)
+		}
+
+		healthRes, err := es.Raw.Cluster.Health(
+			es.Raw.Cluster.Health.WithContext(ctx),
+			es.Raw.Cluster.Health.WithLevel(level),
+		)
+		if err != nil {
+			slog.Error("cluster_health error", "error", err)
+			return nil, nil, fmt.Errorf("cluster health error: %w", err)
+		}
+		defer healthRes.Body.Close()
+		if healthRes.IsError() {
+			return nil, nil, HttpError("cluster health", healthRes)
+		}
+
+		var result map[string]interface{}
+		if err := json.NewDecoder(healthRes.Body).Decode(&result); err != nil {
+			return nil, nil, fmt.Errorf("failed to decode cluster health response: %w", err)
+		}
+
+		jsonOutput, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to encode cluster health response: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: string(jsonOutput)},
+			},
+		}, nil, nil
+	})
+
 	// Register Domain Lookup Tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "lookup_domain",
-		Description: "Look up recent IP addresses and source activity seen for a domain in Zeek DNS logs.",
+		Description: "Fast reverse lookup of IP addresses and source activity seen for a domain, from a rolling 24-hour Redis index of Zeek DNS logs (not a live Elasticsearch query). Requires the indexer pipeline to be running; returns empty if indexing is disabled or the domain wasn't seen in the last 24h. For a full historical or live search, use search_security_events with the domain filter instead.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args LookupDomainArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("lookup_domain", &err)
 		slog.Info("lookup_domain called", "domain", args.Domain)
@@ -364,7 +460,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 	// Register IP Lookup Tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "lookup_ip",
-		Description: "Look up recent DNS activity for an IP (answers and queries) seen in Zeek logs.",
+		Description: "Fast reverse lookup of DNS activity (answers and queries) for an IP, from a rolling 24-hour Redis index of Zeek DNS logs (not a live Elasticsearch query). Requires the indexer pipeline to be running; returns empty if indexing is disabled or the IP wasn't seen in the last 24h. For a full historical or live search, use search_security_events with the ip filter instead.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args LookupIPArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("lookup_ip", &err)
 		slog.Info("lookup_ip called", "ip", args.IP)
@@ -417,4 +513,20 @@ func parseJSONStrings(ss []string) []json.RawMessage {
 		}
 	}
 	return out
+}
+
+func pruneElasticSearchResult(result map[string]interface{}) {
+	delete(result, "_shards")
+	delete(result, "timed_out")
+	if hits, ok := result["hits"].(map[string]interface{}); ok {
+		delete(hits, "max_score")
+		if hitsArr, ok := hits["hits"].([]interface{}); ok {
+			for _, h := range hitsArr {
+				if hit, ok := h.(map[string]interface{}); ok {
+					delete(hit, "_index")
+					delete(hit, "_type")
+				}
+			}
+		}
+	}
 }

@@ -1,4 +1,7 @@
-elastic-mcp-server	
-elastic-cli
+/elastic-mcp-server
+/elastic-cli
+/cli
+/server
 *.log
 elastic-mcp-server.lock
+.codex

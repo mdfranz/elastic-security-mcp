@@ -31,9 +31,10 @@ func fixQuotedKeys(v interface{}) interface{} {
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(obj))
 		for k, val := range obj {
-			if len(k) > 2 && strings.HasPrefix(k, `"`) && strings.HasSuffix(k, `"`) {
-				k = k[1 : len(k)-1]
-			}
+			k = strings.TrimPrefix(k, `\"`)
+			k = strings.TrimSuffix(k, `\"`)
+			k = strings.TrimPrefix(k, `"`)
+			k = strings.TrimSuffix(k, `"`)
 			out[k] = fixQuotedKeys(val)
 		}
 		return out
