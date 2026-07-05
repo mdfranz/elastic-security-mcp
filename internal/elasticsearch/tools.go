@@ -39,6 +39,7 @@ type LookupIPArgs struct {
 
 var maxResponseChars int
 var defaultToolTimeout time.Duration
+var exportToolTimeout time.Duration
 
 func init() {
 	maxResponseChars = 20000
@@ -53,6 +54,12 @@ func init() {
 			defaultToolTimeout = time.Duration(secs) * time.Second
 		}
 	}
+	exportToolTimeout = 30 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("EXPORT_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			exportToolTimeout = time.Duration(secs) * time.Second
+		}
+	}
 }
 
 func MaxResponseChars() int {
@@ -63,6 +70,17 @@ func ensureToolTimeout(ctx context.Context) context.Context {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultToolTimeout)
+		_ = cancel
+	}
+	return ctx
+}
+
+// ensureExportTimeout applies a much longer timeout than other tools, since an
+// export paginates through potentially tens of thousands of rows in one call.
+func ensureExportTimeout(ctx context.Context) context.Context {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, exportToolTimeout)
 		_ = cancel
 	}
 	return ctx
@@ -160,6 +178,7 @@ func normalizeSearchArgs(args SearchArgs) SearchArgs {
 func RegisterTools(server *mcp.Server, es *Client) {
 	cache := NewToolCache()
 	RegisterSecuritySearchTool(server, es, cache)
+	RegisterExportSecurityEventsTool(server, es)
 	RegisterSecurityAlertsTool(server, es, cache)
 	RegisterProcessSearchTool(server, es, cache)
 

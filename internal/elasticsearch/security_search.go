@@ -1,16 +1,20 @@
 package elasticsearch
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	typedsearch "github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/esdsl"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types/enums/operator"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types/enums/sortorder"
@@ -106,6 +110,22 @@ type SearchSecurityEventsArgs struct {
 	From    int    `json:"from,omitempty" jsonschema:"Optional pagination offset (0-based). Use with size to page through results."`
 }
 
+type ExportSecurityEventsArgs struct {
+	Index        string `json:"index" jsonschema:"The index pattern to search (same as search_security_events)"`
+	Text         string `json:"text,omitempty" jsonschema:"Optional free-text query"`
+	Start        string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
+	End          string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
+	IP           string `json:"ip,omitempty" jsonschema:"Optional exact IP filter"`
+	SrcIP        string `json:"src_ip,omitempty" jsonschema:"Optional exact source/client IP filter"`
+	DstIP        string `json:"dst_ip,omitempty" jsonschema:"Optional exact destination/server IP filter"`
+	MAC          string `json:"mac,omitempty" jsonschema:"Optional exact MAC address filter"`
+	Domain       string `json:"domain,omitempty" jsonschema:"Optional exact domain filter"`
+	URL          string `json:"url,omitempty" jsonschema:"Optional exact full URL filter"`
+	Dataset      string `json:"dataset,omitempty" jsonschema:"Optional exact event dataset filter"`
+	Filepath     string `json:"filepath" jsonschema:"Base file path for output (e.g., /tmp/dns_export.jsonl). Files will be named with timestamp and sequence numbers."`
+	RowsPerFile  int    `json:"rows_per_file,omitempty" jsonschema:"Rows per file before batching to next file (default 10000, max 100000)"`
+}
+
 func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache) {
 	innerHandler := WrapWithCache(cache, "search_security_events", SearchSecurityEventsTTL(), func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityEventsArgs) (*mcp.CallToolResult, any, error) {
 		result, err := runSecuritySearch(ctx, es, cache, args)
@@ -131,6 +151,26 @@ func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache
 			return nil, nil, err
 		}
 		return innerHandler(ctx, req, normalized)
+	})
+}
+
+func RegisterExportSecurityEventsTool(server *mcp.Server, es *Client) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "export_security_events",
+		Description: "Export security events to JSONL files with automatic batching and recovery. Paginates through all matching results and writes them to timestamped, sequenced files (e.g., dns_export_20260705T143000Z_001.jsonl, _002.jsonl, etc.). Each file is a valid JSONL (one JSON object per line) and can be processed independently. Use the same filters as search_security_events.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args ExportSecurityEventsArgs) (res *mcp.CallToolResult, extra any, err error) {
+		defer recoverToolPanic("export_security_events", &err)
+		result, err := runExportSecurityEvents(ctx, es, args)
+		if err != nil {
+			return nil, nil, err
+		}
+		jsonOutput, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to encode export_security_events response: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(jsonOutput)}},
+		}, nil, nil
 	})
 }
 
@@ -228,6 +268,17 @@ func buildSecuritySearchRequest(args SearchSecurityEventsArgs) *typedsearch.Requ
 	req.Highlight = buildSecurityHighlight()
 	req.Query = buildSecurityQuery(args)
 	req.Sort = buildSecuritySort(args.Text != "")
+	return req
+}
+
+// buildExportSearchRequest builds the initial scroll request for bulk export.
+// Unlike buildSecuritySearchRequest, it fetches the full source document (no field
+// projection) and skips highlighting and sorting, since exports are consumed as raw
+// data rather than displayed — the scroll API doesn't need a sort to page stably.
+func buildExportSearchRequest(args SearchSecurityEventsArgs, pageSize int) *typedsearch.Request {
+	req := typedsearch.NewRequest()
+	req.Size = &pageSize
+	req.Query = buildSecurityQuery(args)
 	return req
 }
 
@@ -556,6 +607,212 @@ func truncateSummary(s string) string {
 		return s
 	}
 	return strings.TrimSpace(s[:217]) + "..."
+}
+
+func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurityEventsArgs) (map[string]interface{}, error) {
+	if es == nil || es.Typed == nil {
+		return nil, fmt.Errorf("typed elasticsearch client is not configured")
+	}
+
+	normalized, err := normalizeExportArgs(args)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx = ensureExportTimeout(ctx)
+	slog.Info("export_security_events called", "index", normalized.Index, "filepath", normalized.Filepath, "rows_per_file", normalized.RowsPerFile, "start", normalized.Start, "end", normalized.End)
+
+	// Prepare for file writing
+	basePath := normalized.Filepath
+	baseDir := filepath.Dir(basePath)
+	baseName := filepath.Base(basePath)
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+
+	// Remove extension from basename if present
+	if idx := strings.LastIndex(baseName, "."); idx > 0 {
+		baseName = baseName[:idx]
+	}
+
+	// Ensure directory exists
+	if baseDir != "" && baseDir != "." {
+		if err := os.MkdirAll(baseDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create output directory: %w", err)
+		}
+	}
+
+	var exportedFiles []string
+	totalRows := int64(0)
+	fileIndex := 1
+	var currentFile *os.File
+	var currentWriter *bufio.Writer
+	var rowsInCurrentFile int
+	start := time.Now()
+
+	// Create first file
+	filename := filepath.Join(baseDir, fmt.Sprintf("%s_%s_%03d.jsonl", baseName, timestamp, fileIndex))
+	f, err := os.Create(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output file %s: %w", filename, err)
+	}
+	currentFile = f
+	currentWriter = bufio.NewWriter(f)
+	exportedFiles = append(exportedFiles, filename)
+
+	defer func() {
+		if currentFile != nil {
+			currentWriter.Flush()
+			currentFile.Close()
+		}
+	}()
+
+	// Paginate through all results using the scroll API, which has no upper bound
+	// (unlike from/size, which errors out past index.max_result_window — default
+	// 10,000 — long before an export of this size would finish) and doesn't need a
+	// sort/tiebreaker the way search_after does.
+	const pageSize = 1000
+	const scrollDuration = "2m"
+	searchArgs := normalized.toSearchArgs()
+
+	resp, err := es.Typed.Search().
+		Index(normalized.Index).
+		Scroll(scrollDuration).
+		Request(buildExportSearchRequest(searchArgs, pageSize)).
+		Do(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("search error: %w", err)
+	}
+
+	scrollID := ""
+	if resp.ScrollId_ != nil {
+		scrollID = *resp.ScrollId_
+	}
+	defer func() {
+		if scrollID != "" {
+			es.Typed.ClearScroll().ScrollId(scrollID).Do(context.Background())
+		}
+	}()
+
+	hits := resp.Hits.Hits
+	for {
+		if len(hits) == 0 {
+			break
+		}
+
+		// Process each hit
+		for _, hit := range hits {
+			// Create new file if current one is full
+			if rowsInCurrentFile >= normalized.RowsPerFile {
+				currentWriter.Flush()
+				currentFile.Close()
+				fileIndex++
+				rowsInCurrentFile = 0
+
+				filename := filepath.Join(baseDir, fmt.Sprintf("%s_%s_%03d.jsonl", baseName, timestamp, fileIndex))
+				f, err := os.Create(filename)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create output file %s: %w", filename, err)
+				}
+				currentFile = f
+				currentWriter = bufio.NewWriter(f)
+				exportedFiles = append(exportedFiles, filename)
+			}
+
+			// Extract source and write as JSONL
+			var source map[string]interface{}
+			if len(hit.Source_) > 0 {
+				if err := json.Unmarshal(hit.Source_, &source); err != nil {
+					slog.Warn("failed to unmarshal hit source", "id", hit.Id_, "error", err)
+					continue
+				}
+			}
+
+			// Write one JSON object per line
+			data, err := json.Marshal(source)
+			if err != nil {
+				slog.Warn("failed to marshal hit source", "id", hit.Id_, "error", err)
+				continue
+			}
+			currentWriter.Write(data)
+			currentWriter.WriteByte('\n')
+
+			rowsInCurrentFile++
+			totalRows++
+		}
+
+		if len(hits) < pageSize || scrollID == "" {
+			break
+		}
+
+		scrollResp, err := es.Typed.Scroll().ScrollId(scrollID).Scroll(esdsl.NewDuration().String(scrollDuration)).Do(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("scroll error after %d rows: %w", totalRows, err)
+		}
+		if scrollResp.ScrollId_ != nil {
+			scrollID = *scrollResp.ScrollId_
+		}
+		hits = scrollResp.Hits.Hits
+	}
+
+	slog.Info("export_security_events completed", "total_rows", totalRows, "total_files", len(exportedFiles), "elapsed_ms", time.Since(start).Milliseconds())
+
+	return map[string]interface{}{
+		"total_rows":    totalRows,
+		"total_files":   len(exportedFiles),
+		"batch_size":    normalized.RowsPerFile,
+		"files":         exportedFiles,
+		"completed_at":  time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func normalizeExportArgs(args ExportSecurityEventsArgs) (ExportSecurityEventsArgs, error) {
+	args.Index = strings.TrimSpace(args.Index)
+	args.Text = strings.TrimSpace(args.Text)
+	args.Start = strings.TrimSpace(args.Start)
+	args.End = strings.TrimSpace(args.End)
+	args.IP = strings.TrimSpace(args.IP)
+	args.SrcIP = strings.TrimSpace(args.SrcIP)
+	args.DstIP = strings.TrimSpace(args.DstIP)
+	args.MAC = strings.TrimSpace(args.MAC)
+	args.Domain = strings.TrimSpace(args.Domain)
+	args.URL = strings.TrimSpace(args.URL)
+	args.Dataset = strings.TrimSpace(args.Dataset)
+	args.Filepath = strings.TrimSpace(args.Filepath)
+
+	if args.Index == "" {
+		return args, fmt.Errorf("index is required")
+	}
+	if args.Filepath == "" {
+		return args, fmt.Errorf("filepath is required")
+	}
+	if !hasSecurityConstraint(args.toSearchArgs()) {
+		return args, fmt.Errorf("at least one of text, start, end, ip, src_ip, dst_ip, domain, url, or dataset is required")
+	}
+
+	// Set defaults
+	if args.RowsPerFile <= 0 {
+		args.RowsPerFile = 10000
+	}
+	if args.RowsPerFile > 100000 {
+		args.RowsPerFile = 100000
+	}
+
+	return args, nil
+}
+
+func (a ExportSecurityEventsArgs) toSearchArgs() SearchSecurityEventsArgs {
+	return SearchSecurityEventsArgs{
+		Index:   a.Index,
+		Text:    a.Text,
+		Start:   a.Start,
+		End:     a.End,
+		IP:      a.IP,
+		SrcIP:   a.SrcIP,
+		DstIP:   a.DstIP,
+		MAC:     a.MAC,
+		Domain:  a.Domain,
+		URL:     a.URL,
+		Dataset: a.Dataset,
+	}
 }
 
 func firstString(source map[string]interface{}, paths ...string) string {
