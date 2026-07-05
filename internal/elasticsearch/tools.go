@@ -40,6 +40,7 @@ type LookupIPArgs struct {
 var maxResponseChars int
 var defaultToolTimeout time.Duration
 var exportToolTimeout time.Duration
+var exportBatchTimeout time.Duration
 
 func init() {
 	maxResponseChars = 20000
@@ -58,6 +59,12 @@ func init() {
 	if v := strings.TrimSpace(os.Getenv("EXPORT_TIMEOUT_SECS")); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
 			exportToolTimeout = time.Duration(secs) * time.Second
+		}
+	}
+	exportBatchTimeout = 180 * time.Second
+	if v := strings.TrimSpace(os.Getenv("EXPORT_BATCH_TIMEOUT_SECS")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			exportBatchTimeout = time.Duration(secs) * time.Second
 		}
 	}
 }
@@ -84,6 +91,14 @@ func ensureExportTimeout(ctx context.Context) context.Context {
 		_ = cancel
 	}
 	return ctx
+}
+
+// ExportBatchTimeout returns the per-scroll-batch timeout for exports. This is
+// deliberately much shorter than the overall export timeout so a single slow or
+// hung Elasticsearch scroll response fails fast with a clear error, rather than
+// silently blocking for up to the full export duration.
+func ExportBatchTimeout() time.Duration {
+	return exportBatchTimeout
 }
 
 func truncateResults(result map[string]interface{}) {

@@ -111,19 +111,19 @@ type SearchSecurityEventsArgs struct {
 }
 
 type ExportSecurityEventsArgs struct {
-	Index        string `json:"index" jsonschema:"The index pattern to search (same as search_security_events)"`
-	Text         string `json:"text,omitempty" jsonschema:"Optional free-text query"`
-	Start        string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
-	End          string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
-	IP           string `json:"ip,omitempty" jsonschema:"Optional exact IP filter"`
-	SrcIP        string `json:"src_ip,omitempty" jsonschema:"Optional exact source/client IP filter"`
-	DstIP        string `json:"dst_ip,omitempty" jsonschema:"Optional exact destination/server IP filter"`
-	MAC          string `json:"mac,omitempty" jsonschema:"Optional exact MAC address filter"`
-	Domain       string `json:"domain,omitempty" jsonschema:"Optional exact domain filter"`
-	URL          string `json:"url,omitempty" jsonschema:"Optional exact full URL filter"`
-	Dataset      string `json:"dataset,omitempty" jsonschema:"Optional exact event dataset filter"`
-	Filepath     string `json:"filepath" jsonschema:"Base file path for output (e.g., /tmp/dns_export.jsonl). Files will be named with timestamp and sequence numbers."`
-	RowsPerFile  int    `json:"rows_per_file,omitempty" jsonschema:"Rows per file before batching to next file (default 10000, max 100000)"`
+	Index     string `json:"index" jsonschema:"The index pattern to search (same as search_security_events)"`
+	Text      string `json:"text,omitempty" jsonschema:"Optional free-text query"`
+	Start     string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
+	End       string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
+	IP        string `json:"ip,omitempty" jsonschema:"Optional exact IP filter"`
+	SrcIP     string `json:"src_ip,omitempty" jsonschema:"Optional exact source/client IP filter"`
+	DstIP     string `json:"dst_ip,omitempty" jsonschema:"Optional exact destination/server IP filter"`
+	MAC       string `json:"mac,omitempty" jsonschema:"Optional exact MAC address filter"`
+	Domain    string `json:"domain,omitempty" jsonschema:"Optional exact domain filter"`
+	URL       string `json:"url,omitempty" jsonschema:"Optional exact full URL filter"`
+	Dataset   string `json:"dataset,omitempty" jsonschema:"Optional exact event dataset filter"`
+	Filepath  string `json:"filepath" jsonschema:"Base file path for output (e.g., /tmp/dns_export.jsonl). Files will be named with timestamp and sequence numbers."`
+	MaxFileMB int    `json:"max_file_mb,omitempty" jsonschema:"Target file size in MB before rolling over to the next file (default 10, max 200). Document sizes vary a lot by dataset, so this caps file size directly rather than row count."`
 }
 
 func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache) {
@@ -157,10 +157,11 @@ func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache
 func RegisterExportSecurityEventsTool(server *mcp.Server, es *Client) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "export_security_events",
-		Description: "Export security events to JSONL files with automatic batching and recovery. Paginates through all matching results and writes them to timestamped, sequenced files (e.g., dns_export_20260705T143000Z_001.jsonl, _002.jsonl, etc.). Each file is a valid JSONL (one JSON object per line) and can be processed independently. Use the same filters as search_security_events.",
+		Description: "Export security events to JSONL files with automatic size-based batching and recovery. Paginates through all matching results and writes them to timestamped, sequenced files (e.g., dns_export_20260705T143000Z_001.jsonl, _002.jsonl, etc.), rolling over to a new file once the target size (max_file_mb) is reached. Each file is a valid JSONL (one JSON object per line) and can be processed independently. Use the same filters as search_security_events.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ExportSecurityEventsArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("export_security_events", &err)
-		result, err := runExportSecurityEvents(ctx, es, args)
+		reportProgress := newProgressReporter(ctx, req)
+		result, err := runExportSecurityEvents(ctx, es, args, reportProgress)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -172,6 +173,31 @@ func RegisterExportSecurityEventsTool(server *mcp.Server, es *Client) {
 			Content: []mcp.Content{&mcp.TextContent{Text: string(jsonOutput)}},
 		}, nil, nil
 	})
+}
+
+// progressReporter sends an MCP progress notification for one unit of work.
+// It is a no-op if the calling client didn't attach a progress token to the
+// request — per spec, servers should only send notifications when asked to.
+type progressReporter func(progress, total float64, message string)
+
+func newProgressReporter(ctx context.Context, req *mcp.CallToolRequest) progressReporter {
+	token := req.Params.GetProgressToken()
+	if token == nil {
+		slog.Debug("export_security_events: client did not request progress notifications")
+		return func(progress, total float64, message string) {}
+	}
+	slog.Debug("export_security_events: client requested progress notifications", "token", token)
+	return func(progress, total float64, message string) {
+		err := req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+			ProgressToken: token,
+			Progress:      progress,
+			Total:         total,
+			Message:       message,
+		})
+		if err != nil {
+			slog.Warn("failed to send progress notification", "error", err)
+		}
+	}
 }
 
 func runSecuritySearch(ctx context.Context, es *Client, cache *ToolCache, args SearchSecurityEventsArgs) (map[string]interface{}, error) {
@@ -275,9 +301,12 @@ func buildSecuritySearchRequest(args SearchSecurityEventsArgs) *typedsearch.Requ
 // Unlike buildSecuritySearchRequest, it fetches the full source document (no field
 // projection) and skips highlighting and sorting, since exports are consumed as raw
 // data rather than displayed — the scroll API doesn't need a sort to page stably.
+// TrackTotalHits is enabled (a one-time cost on the first page only) so progress
+// notifications can report a percentage rather than just a running row count.
 func buildExportSearchRequest(args SearchSecurityEventsArgs, pageSize int) *typedsearch.Request {
 	req := typedsearch.NewRequest()
 	req.Size = &pageSize
+	req.TrackTotalHits = true
 	req.Query = buildSecurityQuery(args)
 	return req
 }
@@ -609,9 +638,12 @@ func truncateSummary(s string) string {
 	return strings.TrimSpace(s[:217]) + "..."
 }
 
-func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurityEventsArgs) (map[string]interface{}, error) {
+func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurityEventsArgs, reportProgress progressReporter) (map[string]interface{}, error) {
 	if es == nil || es.Typed == nil {
 		return nil, fmt.Errorf("typed elasticsearch client is not configured")
+	}
+	if reportProgress == nil {
+		reportProgress = func(progress, total float64, message string) {}
 	}
 
 	normalized, err := normalizeExportArgs(args)
@@ -620,7 +652,9 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 	}
 
 	ctx = ensureExportTimeout(ctx)
-	slog.Info("export_security_events called", "index", normalized.Index, "filepath", normalized.Filepath, "rows_per_file", normalized.RowsPerFile, "start", normalized.Start, "end", normalized.End)
+	batchTimeout := ExportBatchTimeout()
+	maxFileBytes := int64(normalized.MaxFileMB) * 1024 * 1024
+	slog.Info("export_security_events called", "index", normalized.Index, "filepath", normalized.Filepath, "max_file_mb", normalized.MaxFileMB, "start", normalized.Start, "end", normalized.End)
 
 	// Prepare for file writing
 	basePath := normalized.Filepath
@@ -645,7 +679,7 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 	fileIndex := 1
 	var currentFile *os.File
 	var currentWriter *bufio.Writer
-	var rowsInCurrentFile int
+	var currentFileBytes int64
 	start := time.Now()
 
 	// Create first file
@@ -673,11 +707,13 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 	const scrollDuration = "2m"
 	searchArgs := normalized.toSearchArgs()
 
+	batchCtx, cancel := context.WithTimeout(ctx, batchTimeout)
 	resp, err := es.Typed.Search().
 		Index(normalized.Index).
 		Scroll(scrollDuration).
 		Request(buildExportSearchRequest(searchArgs, pageSize)).
-		Do(ctx)
+		Do(batchCtx)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("search error: %w", err)
 	}
@@ -688,24 +724,48 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 	}
 	defer func() {
 		if scrollID != "" {
-			es.Typed.ClearScroll().ScrollId(scrollID).Do(context.Background())
+			clearCtx, clearCancel := context.WithTimeout(context.Background(), batchTimeout)
+			defer clearCancel()
+			es.Typed.ClearScroll().ScrollId(scrollID).Do(clearCtx)
 		}
 	}()
 
+	totalHits := float64(totalHitsValue(resp.Hits.Total))
+	reportProgress(0, totalHits, fmt.Sprintf("starting export of %d matching events", int64(totalHits)))
+
+	batchNum := 0
 	hits := resp.Hits.Hits
 	for {
 		if len(hits) == 0 {
 			break
 		}
+		batchNum++
 
 		// Process each hit
 		for _, hit := range hits {
-			// Create new file if current one is full
-			if rowsInCurrentFile >= normalized.RowsPerFile {
+			// Extract source and marshal as JSONL up front so we know its size
+			// before deciding whether it forces a rollover to a new file.
+			var source map[string]interface{}
+			if len(hit.Source_) > 0 {
+				if err := json.Unmarshal(hit.Source_, &source); err != nil {
+					slog.Warn("failed to unmarshal hit source", "id", hit.Id_, "error", err)
+					continue
+				}
+			}
+			data, err := json.Marshal(source)
+			if err != nil {
+				slog.Warn("failed to marshal hit source", "id", hit.Id_, "error", err)
+				continue
+			}
+
+			// Roll over to a new file once the current one reaches the target
+			// size. Checked here rather than by row count since document size
+			// varies enormously by dataset (DNS records vs. full TLS certs).
+			if currentFileBytes > 0 && currentFileBytes+int64(len(data))+1 > maxFileBytes {
 				currentWriter.Flush()
 				currentFile.Close()
 				fileIndex++
-				rowsInCurrentFile = 0
+				currentFileBytes = 0
 
 				filename := filepath.Join(baseDir, fmt.Sprintf("%s_%s_%03d.jsonl", baseName, timestamp, fileIndex))
 				f, err := os.Create(filename)
@@ -717,35 +777,25 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 				exportedFiles = append(exportedFiles, filename)
 			}
 
-			// Extract source and write as JSONL
-			var source map[string]interface{}
-			if len(hit.Source_) > 0 {
-				if err := json.Unmarshal(hit.Source_, &source); err != nil {
-					slog.Warn("failed to unmarshal hit source", "id", hit.Id_, "error", err)
-					continue
-				}
-			}
-
-			// Write one JSON object per line
-			data, err := json.Marshal(source)
-			if err != nil {
-				slog.Warn("failed to marshal hit source", "id", hit.Id_, "error", err)
-				continue
-			}
 			currentWriter.Write(data)
 			currentWriter.WriteByte('\n')
+			currentFileBytes += int64(len(data)) + 1
 
-			rowsInCurrentFile++
 			totalRows++
 		}
+
+		slog.Info("export_security_events progress", "batch", batchNum, "total_rows", totalRows, "total_files", len(exportedFiles), "elapsed_ms", time.Since(start).Milliseconds())
+		reportProgress(float64(totalRows), totalHits, fmt.Sprintf("exported %d/%d rows across %d file(s)", totalRows, int64(totalHits), len(exportedFiles)))
 
 		if len(hits) < pageSize || scrollID == "" {
 			break
 		}
 
-		scrollResp, err := es.Typed.Scroll().ScrollId(scrollID).Scroll(esdsl.NewDuration().String(scrollDuration)).Do(ctx)
+		scrollBatchCtx, scrollCancel := context.WithTimeout(ctx, batchTimeout)
+		scrollResp, err := es.Typed.Scroll().ScrollId(scrollID).Scroll(esdsl.NewDuration().String(scrollDuration)).Do(scrollBatchCtx)
+		scrollCancel()
 		if err != nil {
-			return nil, fmt.Errorf("scroll error after %d rows: %w", totalRows, err)
+			return nil, fmt.Errorf("scroll error after %d rows (batch %d): %w", totalRows, batchNum, err)
 		}
 		if scrollResp.ScrollId_ != nil {
 			scrollID = *scrollResp.ScrollId_
@@ -754,13 +804,14 @@ func runExportSecurityEvents(ctx context.Context, es *Client, args ExportSecurit
 	}
 
 	slog.Info("export_security_events completed", "total_rows", totalRows, "total_files", len(exportedFiles), "elapsed_ms", time.Since(start).Milliseconds())
+	reportProgress(float64(totalRows), totalHits, fmt.Sprintf("export complete: %d rows across %d file(s)", totalRows, len(exportedFiles)))
 
 	return map[string]interface{}{
-		"total_rows":    totalRows,
-		"total_files":   len(exportedFiles),
-		"batch_size":    normalized.RowsPerFile,
-		"files":         exportedFiles,
-		"completed_at":  time.Now().UTC().Format(time.RFC3339),
+		"total_rows":   totalRows,
+		"total_files":  len(exportedFiles),
+		"max_file_mb":  normalized.MaxFileMB,
+		"files":        exportedFiles,
+		"completed_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
@@ -789,11 +840,11 @@ func normalizeExportArgs(args ExportSecurityEventsArgs) (ExportSecurityEventsArg
 	}
 
 	// Set defaults
-	if args.RowsPerFile <= 0 {
-		args.RowsPerFile = 10000
+	if args.MaxFileMB <= 0 {
+		args.MaxFileMB = 10
 	}
-	if args.RowsPerFile > 100000 {
-		args.RowsPerFile = 100000
+	if args.MaxFileMB > 200 {
+		args.MaxFileMB = 200
 	}
 
 	return args, nil
