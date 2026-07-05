@@ -46,27 +46,45 @@ The project includes a powerful, agentic CLI that acts as a security analyst ass
 - **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
 - **Optional Web UI**: Use the `--webui` flag to start a local web server with a similar look and feel to the terminal experience.
 
+### CLI Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--model` | `-m` | `""` | Model ID to use (e.g. `gpt-5`, `claude-sonnet-4-6`). Falls back to `ELASTIC_MODEL` env var or interactive selection. |
+| `--memory` | | `true` | Enable conversation memory across turns. |
+| `--prompt` | `-p` | `""` | Run a single prompt non-interactively and exit. |
+| `--webui` | | `false` | Start the optional browser-based Web UI instead of the TUI. |
+| `--port` | | `8080` | Port for the Web UI server. |
+
 ## MCP Server Tools
 
 The MCP server provides the following tools to any compatible host:
 
-- **list_indices**: Tool to see what indices are available in your Elasticsearch cluster, with optional pattern filtering.
-- **search_security_events**: Structured, snippets-first search for ECS-style Zeek and Suricata data with typed filters (`text`, `start`, `end`, `ip`, `src_ip`, `dst_ip`, `domain`, `url`, `dataset`), boosted network fields, and highlighting.
-- **search_security_alerts**: Search Elastic Security detection alerts stored in `.alerts-security.alerts-*` indices, filtering by query, severity, rule name, host, and time range. Projects key process execution details.
-- **lookup_domain**: Check local Redis cache for DNS activity history for a specific domain name. Returns recent DNS queries, source IPs, and resolved addresses from previously observed traffic.
-- **lookup_ip**: Check local Redis cache for any observed activity involving an IP address. Returns DNS records where this IP appeared as an answer and DNS queries made by this IP as a source.
-- **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries.
-- **kibana_api_request**: Execute an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) against any Kibana REST API endpoint (only available if `KIBANA_URL` is set).
-- **list_kibana_spaces**: List all available spaces in Kibana (only available if `KIBANA_URL` is set).
-- **list_detection_rules**: Retrieve a paginated list of detection rules from the Elastic Security app (only available if `KIBANA_URL` is set).
-- **get_detection_rule**: Get details of a specific detection rule by ID or rule_id (only available if `KIBANA_URL` is set).
-- **list_agents**: Retrieve Elastic Agents from Fleet using the Kibana Fleet API (only available if `KIBANA_URL` is set).
+### Elasticsearch Tools
+
+- **list_indices**: List available Elasticsearch indices with doc counts, store size, and health. Supports optional pattern filtering (e.g. `logs-zeek.*`). Results are cached for up to 1 hour.
+- **cluster_health**: Return Elasticsearch cluster health status (green/yellow/red), node counts, shard counts, and unassigned shards. Accepts an optional `level` parameter (`cluster`, `indices`, or `shards`) for more detail.
+- **search_security_events**: Structured, snippets-first search for ECS-style network and endpoint event data (Zeek, Suricata, Packetbeat, Elastic Agent). Supports typed filters (`text`, `start`, `end`, `ip`, `src_ip`, `dst_ip`, `mac`, `domain`, `url`, `dataset`) with boosted network fields and highlighting. At least one filter is required.
+- **export_security_events**: Export large volumes of security events to JSONL files with automatic size-based file rolling, scroll-based pagination, and MCP progress notifications. Uses the same filters as `search_security_events`.
+- **search_security_alerts**: Search Elastic Security detection alerts in `.alerts-security.alerts-*` indices, filtering by query, severity, rule name, host, and time range. Projects key process execution details.
+- **search_processes**: Search endpoint process events (`logs-endpoint.events.process-*`) with flexible filtering by executable, command line, process/parent name, user, PID, SHA256 hash, host, and time range.
+- **lookup_domain**: Fast reverse lookup of DNS activity for a domain, from a rolling 24-hour Redis index of Zeek DNS logs. Returns recent queries, source IPs, and resolved addresses. For full historical queries, use `search_security_events`.
+- **lookup_ip**: Fast reverse lookup of DNS activity (answers and queries) for an IP address, from a rolling 24-hour Redis index of Zeek DNS logs. For full historical queries, use `search_security_events`.
+- **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries. Prefer `search_security_events` for common filters; use this only when raw DSL control is required.
+
+### Kibana Tools (optional — requires `KIBANA_URL`)
+
+- **kibana_api_request**: Execute an arbitrary HTTP request (GET, POST, PUT, DELETE, PATCH) against any Kibana REST API endpoint.
+- **list_kibana_spaces**: List all available spaces in a Kibana instance.
+- **list_detection_rules**: Retrieve a paginated list of detection rules from the Elastic Security app.
+- **get_detection_rule**: Get details of a specific detection rule by its internal `id` or user-defined `rule_id`.
+- **list_agents**: Retrieve Elastic Agents from Fleet using the Kibana Fleet API, with optional KQL filtering and pagination.
 
 ## Key Libraries
 
 This project leverages several powerful libraries:
 
-- [**Elasticsearch Go Client**](https://github.com/elastic/go-elasticsearch): The official Go client for Elasticsearch.
+- [**Elasticsearch Go Client**](https://github.com/elastic/go-elasticsearch): The official Go client for Elasticsearch (v9).
 - [**Model Context Protocol (MCP) SDK**](https://github.com/modelcontextprotocol/go-sdk): SDK for building MCP servers and clients.
 - [**Redis Go Client**](https://github.com/redis/go-redis): Type-safe Redis client for Go.
 - [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
@@ -135,12 +153,16 @@ Optional variables:
 - `CLIENT_HISTORY_FILE`: Path to the CLI command history file. Default is `~/.elastic-cli-history`.
 - `SERVER_LOG_FILE`: Log file path for the MCP server. Default is `elastic-mcp-server.log`.
 - `SERVER_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` for the MCP server. Default is `info`.
+- `SERVER_LOCK_FILE`: Path to the server PID lock file. Default is `elastic-mcp-server.lock`.
 - `CACHE_ENABLED`: Set to `false` to disable Redis caching. Default is `true`.
 - `REDIS_ADDR`: Address of the Redis server. Default is `localhost:6379`.
 - `CACHE_SEARCH_SECURITY_EVENTS_TTL`: Cache TTL in seconds for `search_security_events`. Default is `600`.
 - `CACHE_SEARCH_ELASTIC_TTL`: Cache TTL in seconds for `search_elastic`. Default is `600`.
 - `CACHE_LIST_INDICES_TTL`: Cache TTL in seconds for `list_indices`. Default is `3600`.
 - `MAX_RESPONSE_CHARS`: Maximum JSON response size returned by search tools before truncation. Default is `20000`.
+- `TOOL_TIMEOUT_SECS`: Per-tool execution timeout in seconds. Default is `30`.
+- `EXPORT_TIMEOUT_SECS`: Overall timeout in seconds for the `export_security_events` tool. Default is `1800` (30 minutes).
+- `EXPORT_BATCH_TIMEOUT_SECS`: Per-scroll-batch timeout in seconds during exports. Default is `180`.
 
 ## Usage
 
@@ -161,11 +183,17 @@ You can also pick a model explicitly:
 ./elastic-cli --model gpt-5
 ```
 
+Run a single query non-interactively and exit:
+
+```bash
+./elastic-cli --prompt "Show me the top 10 DNS queries in the last hour"
+```
+
 The CLI is tuned to prefer `search_security_events` for typical investigations and only fall back to `search_elastic` when raw DSL control is required.
 
 ### Running the server standalone
 
-The server communicates over Standard Input/Output (stdio) and can be used with any MCP host.
+The server communicates over Standard Input/Output (stdio) and can be used with any MCP host. It enforces a single-instance lock (via `elastic-mcp-server.lock`) to prevent duplicate server processes.
 
 ```bash
 ./elastic-mcp-server
@@ -204,3 +232,5 @@ The CLI and Server log to files for debugging:
 You can change the log file locations independently with `CLIENT_LOG_FILE` and `SERVER_LOG_FILE`.
 Set `CLIENT_LOG_LEVEL=debug` or `SERVER_LOG_LEVEL=debug` for more detail in the corresponding process.
 Set `CLIENT_LOG_PAYLOADS=true` only when you explicitly want full CLI request/response payload logging.
+
+If the server fails to start with a "already running" error, check or remove the lock file (default: `elastic-mcp-server.lock`).
