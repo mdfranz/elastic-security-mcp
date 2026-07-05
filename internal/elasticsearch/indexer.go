@@ -57,7 +57,7 @@ func indexSearchResult(ctx context.Context, client *redis.Client, result map[str
 		if _, err := pipe.Exec(ctx); err != nil {
 			slog.Warn("redis batch index error", "error", err)
 		} else {
-			slog.Info("indexed search hits", "count", indexed)
+			slog.Debug("indexed search hits", "count", indexed)
 		}
 	}
 }
@@ -87,7 +87,7 @@ func indexTypedSearchResult(ctx context.Context, client *redis.Client, result *s
 		if _, err := pipe.Exec(ctx); err != nil {
 			slog.Warn("redis batch index error", "error", err)
 		} else {
-			slog.Info("indexed typed search hits", "count", indexed)
+			slog.Debug("indexed typed search hits", "count", indexed)
 		}
 	}
 }

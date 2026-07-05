@@ -276,12 +276,13 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 				} else {
 					resultText = extractToolContent(toolResp)
 					isError = toolResp != nil && toolResp.IsError
-					if strings.HasPrefix(resultText, "✓ ") {
-						isCached = true
-						resultText = strings.TrimPrefix(resultText, "✓ ")
-					} else if strings.HasPrefix(resultText, "↓ ") {
-						isStored = true
-						resultText = strings.TrimPrefix(resultText, "↓ ")
+					if toolResp != nil {
+						switch toolResp.Meta["cache_status"] {
+						case "hit":
+							isCached = true
+						case "stored":
+							isStored = true
+						}
 					}
 				}
 				finalState := "completed"

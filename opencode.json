@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "elastic-security-mcp": {
+      "type": "local",
+      "command": [
+        "/home/mdfranz/github/elastic-security-mcp/elastic-mcp-server"
+      ],
+      "environment": {
+        "SERVER_LOG_LEVEL": "debug",
+        "ELASTIC_URL": "{env:ELASTIC_URL}",
+        "ELASTIC_KEY": "{env:ELASTIC_KEY}",
+        "KIBANA_URL": "{env:KIBANA_URL}",
+        "KIBANA_USER": "mcp",
+        "KIBANA_PASS": "{env:KIBANA_PASS}"
+      }
+    }
+  }
+}

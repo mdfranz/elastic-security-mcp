@@ -123,7 +123,7 @@ func RegisterSecuritySearchTool(server *mcp.Server, es *Client, cache *ToolCache
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_security_events",
-		Description: "Search ECS-style security event data with typed filters, tuned boosts, filter-context constraints, and snippets-first highlighting. Supports network logs (Zeek via logs-zeek.*-*, Suricata via logs-suricata.*-*, Packetbeat via packetbeat-*) and endpoint events (logs-endpoint.events.network-*, logs-endpoint.events.file-*, logs-endpoint.events.*). Use search_processes for endpoint process events.",
+		Description: "Search ECS-style security event data with typed filters, tuned boosts, filter-context constraints, and snippets-first highlighting. Supports network logs (Zeek via logs-zeek.*-*, Suricata via logs-suricata.*-*, Packetbeat via packetbeat-*) and endpoint events (logs-endpoint.events.network-*, logs-endpoint.events.file-*, logs-endpoint.events.*). Use search_processes for endpoint process events. Requires at least one of: text, start, end, ip, src_ip, dst_ip, mac, domain, url, or dataset — a bare index with no filters is rejected.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchSecurityEventsArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_security_events", &err)
 		normalized, err := normalizeSecuritySearchArgs(args)
@@ -463,16 +463,12 @@ func shapeSecurityHit(hit types.Hit) (map[string]interface{}, error) {
 	dataset := firstString(compactSource, "event.dataset", "data_stream.dataset")
 
 	out := map[string]interface{}{
-		"_index":     hit.Index_,
 		"_id":        valueOrEmpty(hit.Id_),
 		"timestamp":  timestamp,
 		"dataset":    dataset,
 		"summary":    buildSecuritySummary(highlights, compactSource),
 		"highlights": highlights,
 		"source":     compactSource,
-	}
-	if hit.Score_ != nil {
-		out["_score"] = float64(*hit.Score_)
 	}
 	if len(highlights) == 0 {
 		delete(out, "highlights")
