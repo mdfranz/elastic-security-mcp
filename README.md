@@ -205,7 +205,7 @@ The server communicates over Standard Input/Output (stdio) and can be used with 
 ./elastic-mcp-server
 ```
 
-### Integrating with external MCP Clients (Claude Desktop, Cursor, etc.)
+### Integrating with external MCP Clients (Claude Code, Gemini CLI)
 
 A template configuration is available in `.mcp.json`. You can copy or reference this file to configure external MCP hosts (like Claude Desktop or Cursor).
 
@@ -215,14 +215,38 @@ For example, to configure the server in **Claude Desktop**, edit `~/.config/Clau
 {
   "mcpServers": {
     "elastic-security-mcp": {
-      "command": "/absolute/path/to/elastic-mcp-server",
+      "command": "elastic-mcp-server",
       "args": [],
       "env": {
-        "ELASTIC_URL": "https://your-elasticsearch-endpoint",
-        "ELASTIC_KEY": "your-elasticsearch-api-key",
-        "KIBANA_URL": "https://your-kibana-endpoint",
-        "KIBANA_USER": "elastic",
-        "KIBANA_PASS": "your-kibana-password"
+        "SERVER_LOG_LEVEL": "debug",
+        "ELASTIC_URL": "${ELASTIC_URL}",
+        "ELASTIC_KEY": "${ELASTIC_KEY}",
+        "KIBANA_URL":  "${KIBANA_URL}",
+        "KIBANA_USER": "mcp",
+        "KIBANA_PASS": "${KIBANA_PASS}"      }
+    }
+  }
+}
+```
+
+OpenCode
+
+```
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "elastic-security-mcp": {
+      "type": "local",
+      "command": [
+        "elastic-mcp-server"
+      ],
+      "environment": {
+        "SERVER_LOG_LEVEL": "debug",
+        "ELASTIC_URL": "{env:ELASTIC_URL}",
+        "ELASTIC_KEY": "{env:ELASTIC_KEY}",
+        "KIBANA_URL": "{env:KIBANA_URL}",
+        "KIBANA_USER": "mcp",
+        "KIBANA_PASS": "{env:KIBANA_PASS}"
       }
     }
   }
