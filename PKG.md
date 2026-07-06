@@ -9,13 +9,14 @@ This document lists and classifies the 3rd party dependencies used in the `elast
 *   **[github.com/elastic/elastic-transport-go/v8](https://github.com/elastic/elastic-transport-go)**: HTTP transport for Elastic clients. This repo does not import it directly, but it is pulled in underneath `go-elasticsearch` and handles the actual request/response transport used by the raw and typed Elasticsearch clients.
 
 ### Model Context Protocol (MCP)
-*   **[github.com/modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk)**: Go SDK for implementing MCP servers and clients. It is the core application protocol layer here: `cmd/server/main.go` creates the MCP server over stdio, `internal/elasticsearch/tools.go` and `internal/elasticsearch/security_search.go` register tools, `cmd/cli/main.go` launches the server as a child process and calls tools through an MCP client session, `internal/webui/server.go` relays browser requests into MCP tool calls, and `cmd/test-mcp/main.go` is a minimal MCP smoke-test client.
+*   **[github.com/modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk)**: Go SDK for implementing MCP servers and clients. In this project, it is the core protocol layer for the server-side components: `cmd/server/main.go` implements the standalone MCP server, `internal/elasticsearch/tools.go` and `internal/elasticsearch/security_search.go` register schemas and tools, and `cmd/test-mcp/main.go` is a minimal smoke-test client that queries the server directly using the SDK's client interface.
+*   **[github.com/zendev-sh/goai/mcp](https://github.com/zendev-sh/goai)**: The MCP integration sub-package of `goai`. It provides the client interface used by the frontends: `cmd/cli/main.go` launches the server process and interacts with it through this client, `internal/agent/agent.go` uses it to invoke tools automatically during the LLM conversation loop, and `internal/webui/server.go` leverages it to relay web interface commands to the backend.
 
 ### Caching
 *   **[github.com/redis/go-redis/v9](https://github.com/redis/go-redis)**: Type-safe Redis client for Go. `internal/elasticsearch/cache.go` uses it to cache MCP tool results by hashed arguments and TTL, while `internal/elasticsearch/indexer.go` uses Redis sorted sets to build short-lived entity lookups from Zeek DNS hits such as domain-to-IP and IP-to-domain history.
 
 ## LLM & AI
-*   **[github.com/mozilla-ai/any-llm-go](https://github.com/mozilla-ai/any-llm-go)**: Go library for unified LLM provider integration. It is used as the core LLM orchestration layer in this project, replacing `langchaingo` to interface directly with OpenAI, Anthropic, and Gemini (supporting thought signatures natively).
+*   **[github.com/zendev-sh/goai](https://github.com/zendev-sh/goai)**: Go library for unified LLM provider integration. It is used as the core LLM orchestration layer in this project, replacing `pi-llm-go` and `any-llm-go` to connect directly to OpenAI, Anthropic, and Gemini (managing context history and generation parameters under a standard model abstraction).
 
 ## Command Line Interface (CLI)
 
@@ -47,7 +48,7 @@ The frontend is a lightweight Single Page Application (SPA) built with modern we
 
 ### Text Processing & Parsing
 *   **[github.com/yuin/goldmark](https://github.com/yuin/goldmark)**: A markdown parser written in Go. The repo does not import it directly; it comes in transitively through the terminal markdown stack used by Glamour.
-*   **[github.com/google/jsonschema-go](https://github.com/google/jsonschema-go)**: JSON Schema support for Go. This is not referenced directly in project code, but it underpins JSON schema generation in the MCP SDK for the tool argument structs that use `jsonschema` tags in `internal/elasticsearch/tools.go` and `internal/elasticsearch/security_search.go`.
+*   **[github.com/google/jsonschema-go](https://github.com/google/jsonschema-go)**: JSON Schema support for Go. It is used in `internal/elasticsearch/tools.go` to construct the `jsonschema.Schema` definitions for registering tool arguments with the MCP server, and underpins schema generation for structs that use `jsonschema` tags.
 
 ### General Utilities
 *   **[github.com/google/uuid](https://github.com/google/uuid)**: Go package for generating and inspecting UUIDs. It is currently only an indirect dependency; this repo generates tool call IDs with `crypto/rand` and `encoding/hex` instead of importing `uuid` directly.

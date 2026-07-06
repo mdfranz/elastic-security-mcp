@@ -95,7 +95,7 @@ This project leverages several powerful libraries:
 - [**Redis Go Client**](https://github.com/redis/go-redis): Type-safe Redis client for Go.
 - [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
 - [**Lip Gloss**](https://github.com/charmbracelet/lipgloss): Style and layout primitives for the terminal.
-- [**any-llm-go**](https://github.com/mozilla-ai/any-llm-go): A Go library for integrating with multiple LLM providers (OpenAI, Anthropic, Gemini) with a unified interface.
+- [**goai**](https://github.com/zendev-sh/goai): A Go library for integrating with multiple LLM providers (OpenAI, Anthropic, Gemini) with a unified interface and built-in agentic tool-calling loop support.
 - [**Cobra**](https://github.com/spf13/cobra): A library for creating powerful modern CLI applications.
 - [**Glamour**](https://github.com/charmbracelet/glamour): Markdown rendering for the terminal.
 
