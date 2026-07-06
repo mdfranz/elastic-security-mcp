@@ -100,9 +100,9 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ### Key Accomplishments
 - **Provider Migration Path**: Moved the LLM integration away from LangChainGo through a sequence of experimental branches:
-  - `any-llm-go` (June 25, 2026): Ported the integration layer from LangChainGo to Any-LLM-Go, added `ANYLLM-LANGCHAIN-GO.md`, updated entity-lookup prompt guidance, replaced LangChainGo references in docs, and resolved merge conflicts against `main` (`a59d51e` → `c1622fc`).
-  - `pi-llm-port` (June 26, 2026): Ported the integration from Any-LLM-Go to `pi-llm-go` (`6078c18`).
-  - `zendev-goai` (June 26, 2026): Ported the integration from `pi-llm-go` to the `goai` provider framework (`a712d25`).
+  - `any-llm-go` (June 25, 2026): Ported the integration layer from LangChainGo to Any-LLM-Go, added `docs/ANYLLM-LANGCHAIN-GO.md` (now integrated into [PROVIDER-COMPARISON.md](docs/PROVIDER-COMPARISON.md)), updated entity-lookup prompt guidance, replaced LangChainGo references in docs, and resolved merge conflicts against `main` (`a59d51e` → `c1622fc`).
+  - `pi-llm-port` (June 26, 2026): Ported the integration from Any-LLM-Go to `pi-llm-go` (`6078c18`), documented in `docs/pi-llm-port.md` (integrated into [PROVIDER-COMPARISON.md](docs/PROVIDER-COMPARISON.md)).
+  - `zendev-goai` (June 26, 2026): Ported the integration from `pi-llm-go` to the `goai` provider framework (`a712d25`), documented in `docs/GOAI-PORT.md` (integrated into [PROVIDER-COMPARISON.md](docs/PROVIDER-COMPARISON.md)).
 - **Engine Unification**: Centralized the LLM tool-calling and sequential tool execution loop from duplicated implementations in the CLI TUI (`cmd/cli/main.go`) and Web UI (`internal/webui/server.go`) into a unified, reusable `internal/agent.Engine` package.
 - **LLM Observability Hooks**: Implemented the `internal/llmobs` package to register lifecycle hooks for logging LLM requests, latency, token usage, and error statuses via standard structured logging (`slog`).
 - **Comprehensive Unit Testing**: Formulated a structured testing plan in `docs/TEST-COVERAGE-PLAN.md` and implemented robust unit tests (Phases 1, 2, 3, 5, and 6) covering:
