@@ -131,10 +131,12 @@ func TestBuildListAgentsPath(t *testing.T) {
 
 func TestFormatResponse(t *testing.T) {
 	tests := []struct {
-		name       string
-		body       []byte
-		statusCode int
-		want       []string
+		name            string
+		body            []byte
+		statusCode      int
+		want            []string
+		wantErrorExpect bool
+		wantErrSubstr   string
 	}{
 		{
 			name:       "pretty prints JSON",
@@ -149,16 +151,30 @@ func TestFormatResponse(t *testing.T) {
 			want:       []string{`plain response`},
 		},
 		{
-			name:       "prefixes HTTP errors without returning Go error",
-			body:       []byte(`{"error":"nope"}`),
-			statusCode: 404,
-			want:       []string{`HTTP Error 404:`, `"error": "nope"`},
+			name:            "returns Go error for HTTP errors",
+			body:            []byte(`{"error":"nope"}`),
+			statusCode:      404,
+			wantErrorExpect: true,
+			wantErrSubstr:   "HTTP 404",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			res, extra, err := formatResponse(tt.body, tt.statusCode)
+			if tt.wantErrorExpect {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSubstr) {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.wantErrSubstr)
+				}
+				if res != nil {
+					t.Fatalf("expected nil result on error, got %#v", res)
+				}
+				return
+			}
+
 			if err != nil {
 				t.Fatalf("formatResponse error: %v", err)
 			}

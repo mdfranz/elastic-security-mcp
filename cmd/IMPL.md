@@ -89,6 +89,13 @@ Pure-function unit tests, no mocks needed (cache-prefix parsing now lives in `in
 - `TestBuildMarkdownExport` — checks title, `Exported on: <RFC1123>` line, and role-labeled sections ("You:"/"Assistant:"/"System:").
 - `TestExportFilename` — checks `exportFilename` produces `investigation-export-2026-05-05T09-30-45.md` for a fixed time.
 - `TestNormalizeMarkdownForTerminal` — checks `###`/`##` headers get hashes stripped (indentation preserved) while non-header lines (including bullets) pass through unchanged.
+- `TestModelProvider` — covers every documented prefix (`gpt-`, `o1-`, `o3-`, `claude-`, `gemini-`) plus an unknown prefix and an empty string returning `""`.
+- `TestPushInputHistoryDedupesConsecutiveEntries`/`TestPushInputHistoryIgnoresBlankInput` — exercise `pushInputHistory` against a `t.Setenv("CLIENT_HISTORY_FILE", ...)`-redirected temp file, since `pushInputHistory` calls `saveHistory` as a side effect.
+- `TestBrowseHistoryPreservesDraftAndBoundaries`/`TestBrowseHistoryNoOpWhenEmpty` — readline-style recall: draft stash/restore, top/bottom clamping, no-op on empty history.
+- `TestPruneHistoryRetainsNewestMessages`/`TestPruneHistoryNoOpUnderLimit` — confirms the rolling window keeps the newest `maxHistoryMessages` and is a no-op under the cap.
+- `TestFormatToolCallArgumentsEmptyInput`/`...MalformedJSONFallsBackToRaw`/`...ExpandsNestedJSONString`/`...ToleratesMissingToolName` — covers `formatToolCallArguments`'s empty-input `"{}"` shortcut, raw-passthrough on unparseable JSON, the nested-JSON-string expansion (e.g. `search_elastic`'s `query` field), and confirms the function never reads `tc.Name` so an empty tool name doesn't affect formatting.
+
+These tests construct a bare `model{histIndex: -1, textInput: textinput.New()}` via a local `newTestModel()` helper rather than going through `initialModel` — no Bubble Tea program, MCP client, or LLM provider is started.
 
 ## cmd/server/main.go — MCP server entrypoint
 

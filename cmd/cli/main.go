@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,20 +22,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
+	"github.com/mfranz/elastic-security-mcp/internal/util"
+	"github.com/mfranz/elastic-security-mcp/internal/webui"
+	"github.com/spf13/cobra"
 	goai "github.com/zendev-sh/goai"
 	goaimcp "github.com/zendev-sh/goai/mcp"
 	"github.com/zendev-sh/goai/provider"
 	"github.com/zendev-sh/goai/provider/anthropic"
 	"github.com/zendev-sh/goai/provider/google"
 	"github.com/zendev-sh/goai/provider/openai"
-	"github.com/mfranz/elastic-security-mcp/internal/agent"
-	"github.com/mfranz/elastic-security-mcp/internal/util"
-	"github.com/mfranz/elastic-security-mcp/internal/webui"
-	"github.com/spf13/cobra"
 )
 
 const maxHistoryMessages = 15
 const footerReserveLines = 9
+const maxToolPanelItems = 24
+const minToolPanelTerminalWidth = 110
+const minToolPanelWidth = 36
+const maxToolPanelWidth = 48
+const panelGapWidth = 2
 
 // Styles
 var (
@@ -82,6 +88,30 @@ var (
 
 	systemStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#A8A8A8"))
+
+	toolPanelTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#E6EEF8"))
+
+	toolPanelMetaStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6D7E97"))
+
+	toolPanelCardStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#3D536A")).
+				Padding(0, 1)
+
+	toolPanelRunningStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFD59A")).
+				Bold(true)
+
+	toolPanelCompletedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#9BF4CB")).
+				Bold(true)
+
+	toolPanelErrorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFC1C1")).
+				Bold(true)
 )
 
 // agentEvent wraps an agent.Event for the Bubble Tea message chain. A
@@ -101,6 +131,19 @@ type exportMessage struct {
 	content string
 }
 
+type toolPanelItem struct {
+	id            string
+	seq           int
+	name          string
+	state         string
+	argsSummary   string
+	argsDetail    string
+	resultPreview string
+	isError       bool
+	isCached      bool
+	isStored      bool
+}
+
 type focusArea int
 
 const (
@@ -115,10 +158,10 @@ type model struct {
 	history   []provider.Message
 	modelName string
 	useMemory bool
-	lastInput  string
-	inputHist  []string
-	histIndex  int
-	histDraft  string
+	lastInput string
+	inputHist []string
+	histIndex int
+	histDraft string
 
 	viewport  viewport.Model
 	textInput textinput.Model
@@ -136,6 +179,11 @@ type model struct {
 	cacheMisses  int
 	cacheStores  int
 	toolErrors   int
+	toolPanel    []toolPanelItem
+	toolIndex    map[string]int
+	nextToolID   int
+	activeToolID map[string]string
+	termWidth    int
 	err          error
 	ready        bool
 }
@@ -163,19 +211,21 @@ func initialModel(ctx context.Context, mcpClient *goaimcp.Client, llmModel provi
 	)
 
 	return model{
-		ctx:       ctx,
-		engine:    agent.New(mcpClient, llmModel, tools, modelName),
-		modelName: modelName,
-		useMemory: useMemory,
-		inputHist: loadHistory(),
-		histIndex: -1,
-		textInput: ti,
-		spinner:   s,
-		renderer:  renderer,
-		isDark:    isDark,
-		focus:     focusInput,
-		history:   []provider.Message{},
-		messages:  []string{},
+		ctx:          ctx,
+		engine:       agent.New(mcpClient, llmModel, tools, modelName),
+		modelName:    modelName,
+		useMemory:    useMemory,
+		inputHist:    loadHistory(),
+		histIndex:    -1,
+		textInput:    ti,
+		spinner:      s,
+		renderer:     renderer,
+		isDark:       isDark,
+		focus:        focusInput,
+		history:      []provider.Message{},
+		messages:     []string{},
+		toolIndex:    make(map[string]int),
+		activeToolID: make(map[string]string),
 	}
 }
 
@@ -209,6 +259,27 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max-3]) + "..."
 }
 
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func shouldShowToolPanel(width int) bool {
+	return width >= minToolPanelTerminalWidth
+}
+
+func toolPanelWidthForTerminal(width int) int {
+	if !shouldShowToolPanel(width) {
+		return 0
+	}
+	return clampInt(width/3, minToolPanelWidth, maxToolPanelWidth)
+}
+
 func dividerLine(width int) string {
 	if width <= 0 {
 		return ""
@@ -227,6 +298,145 @@ func exportLabel(role string) string {
 	default:
 		return role
 	}
+}
+
+func toolCallKey(t *agent.ToolCallEvent) string {
+	if t == nil {
+		return ""
+	}
+	if t.Call.ID != "" {
+		return t.Call.ID
+	}
+	return fmt.Sprintf("%s#%d", t.Call.Name, t.Seq)
+}
+
+func (m *model) startToolPanelID(t *agent.ToolCallEvent) string {
+	if m.activeToolID == nil {
+		m.activeToolID = make(map[string]string)
+	}
+	m.nextToolID++
+	raw := toolCallKey(t)
+	id := fmt.Sprintf("%s#%d", raw, m.nextToolID)
+	m.activeToolID[raw] = id
+	return id
+}
+
+func (m *model) endToolPanelID(t *agent.ToolCallEvent) string {
+	if m.activeToolID == nil {
+		m.activeToolID = make(map[string]string)
+	}
+	raw := toolCallKey(t)
+	if id, ok := m.activeToolID[raw]; ok {
+		delete(m.activeToolID, raw)
+		return id
+	}
+	return raw
+}
+
+func summarizeToolArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return "No arguments."
+	}
+
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, min(len(keys), 3))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %s", key, summarizeToolValue(args[key])))
+		if len(parts) == 3 {
+			break
+		}
+	}
+	if len(keys) > len(parts) {
+		parts = append(parts, fmt.Sprintf("+%d", len(keys)-len(parts)))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func summarizeToolValue(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return "null"
+	case []any:
+		return fmt.Sprintf("[%d]", len(v))
+	case map[string]any:
+		return "{...}"
+	default:
+		text := strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+		return truncateRunes(text, 42)
+	}
+}
+
+func summarizeToolResult(result string) string {
+	for _, line := range strings.Split(result, "\n") {
+		normalized := strings.Join(strings.Fields(line), " ")
+		if normalized != "" {
+			return truncateRunes(normalized, 72)
+		}
+	}
+	return "No textual result."
+}
+
+func (m *model) upsertToolPanelItem(id string, t *agent.ToolCallEvent) {
+	if t == nil || id == "" {
+		return
+	}
+
+	item := toolPanelItem{
+		id:          id,
+		seq:         t.Seq,
+		name:        t.Call.Name,
+		state:       t.State,
+		argsSummary: summarizeToolArgs(t.Args),
+		argsDetail:  formatToolCallArguments(t.Call),
+		isError:     t.IsError,
+		isCached:    t.IsCached,
+		isStored:    t.IsStored,
+	}
+	if strings.TrimSpace(t.Result) != "" {
+		item.resultPreview = summarizeToolResult(t.Result)
+	}
+
+	if idx, ok := m.toolIndex[id]; ok && idx >= 0 && idx < len(m.toolPanel) {
+		existing := m.toolPanel[idx]
+		if item.name == "" {
+			item.name = existing.name
+		}
+		if item.argsSummary == "No arguments." && existing.argsSummary != "" {
+			item.argsSummary = existing.argsSummary
+		}
+		if item.argsDetail == "{}" && existing.argsDetail != "" {
+			item.argsDetail = existing.argsDetail
+		}
+		m.toolPanel[idx] = item
+		return
+	}
+
+	m.toolPanel = append([]toolPanelItem{item}, m.toolPanel...)
+	if len(m.toolPanel) > maxToolPanelItems {
+		m.toolPanel = m.toolPanel[:maxToolPanelItems]
+	}
+	m.reindexToolPanel()
+}
+
+func (m *model) reindexToolPanel() {
+	if m.toolIndex == nil {
+		m.toolIndex = make(map[string]int)
+	}
+	clear(m.toolIndex)
+	for i, item := range m.toolPanel {
+		m.toolIndex[item.id] = i
+	}
+}
+
+func (m *model) clearToolPanel() {
+	m.toolPanel = nil
+	m.reindexToolPanel()
+	m.activeToolID = make(map[string]string)
 }
 
 func buildMarkdownExport(conversation []exportMessage, exportedAt time.Time) string {
@@ -321,6 +531,87 @@ func (m model) renderFooterMetaLine(width int) string {
 
 	line := strings.Join(parts, footerSeparatorStyle.Render("  "))
 	return lipgloss.NewStyle().MaxWidth(width).Render(line)
+}
+
+func toolStateLabel(item toolPanelItem) string {
+	if item.isCached && item.state == "completed" {
+		return "cached"
+	}
+	return item.state
+}
+
+func toolStateStyle(item toolPanelItem) lipgloss.Style {
+	if item.isError || item.state == "error" {
+		return toolPanelErrorStyle
+	}
+	if item.state == "running" {
+		return toolPanelRunningStyle
+	}
+	return toolPanelCompletedStyle
+}
+
+func renderToolPanelLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return lipgloss.NewStyle().Width(width).Render(truncateRunes(line, width))
+}
+
+func (m model) renderToolPanel(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+
+	innerWidth := max(width-4, 1)
+	lines := []string{
+		toolPanelTitleStyle.Render("Tool Activity"),
+		toolPanelMetaStyle.Render(fmt.Sprintf("%d total", len(m.toolPanel))),
+		"",
+	}
+
+	if len(m.toolPanel) == 0 {
+		lines = append(lines, toolPanelMetaStyle.Copy().Width(innerWidth).Render("Tool calls will appear here."))
+	} else {
+		for _, item := range m.toolPanel {
+			state := toolStateStyle(item).Render(toolStateLabel(item))
+			name := item.name
+			if name == "" {
+				name = "(unknown)"
+			}
+			if item.isStored {
+				state += toolPanelMetaStyle.Render(" store")
+			}
+			nameWidth := max(innerWidth-2-lipgloss.Width(state)-2, 1)
+			topLine := renderToolPanelLine(name, nameWidth) + "  " + state
+			cardLines := []string{
+				topLine,
+				toolPanelMetaStyle.Render(renderToolPanelLine(item.argsSummary, innerWidth-2)),
+			}
+			if item.resultPreview != "" {
+				cardLines = append(cardLines, toolPanelMetaStyle.Render(renderToolPanelLine(item.resultPreview, innerWidth-2)))
+			}
+
+			card := toolPanelCardStyle.Copy().Width(innerWidth).Render(strings.Join(cardLines, "\n"))
+			lines = append(lines, strings.Split(card, "\n")...)
+			lines = append(lines, "")
+		}
+	}
+
+	maxInnerHeight := max(height-2, 1)
+	if len(lines) > maxInnerHeight {
+		lines = lines[:maxInnerHeight]
+	}
+	for len(lines) < maxInnerHeight {
+		lines = append(lines, "")
+	}
+
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("#3D536A")).
+		PaddingLeft(1).
+		Render(strings.Join(lines, "\n"))
 }
 
 func (m *model) pushInputHistory(input string) {
@@ -468,7 +759,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Wrap human input
-			wrappedUser := lipgloss.NewStyle().Width(m.viewport.Width - 10).Render(input)
+			m.clearToolPanel()
+			wrappedUser := lipgloss.NewStyle().Width(max(m.viewport.Width-10, 20)).Render(input)
 			m.messages = append(m.messages, fmt.Sprintf("%s %s", userStyle.Render("You:"), wrappedUser))
 			m.appendConversation("user", input)
 
@@ -489,15 +781,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
+		m.termWidth = msg.Width
+		toolWidth := toolPanelWidthForTerminal(msg.Width)
+		mainWidth := msg.Width
+		if toolWidth > 0 {
+			mainWidth = max(msg.Width-toolWidth-panelGapWidth, 20)
+		}
+		mainHeight := max(msg.Height-footerReserveLines, 1)
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, msg.Height-footerReserveLines)
+			m.viewport = viewport.New(mainWidth, mainHeight)
 			m.viewport.HighPerformanceRendering = false
 			m.viewport.SetContent(strings.Join(m.messages, "\n"))
 			m.ready = true
 		} else {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - footerReserveLines
+			m.viewport.Width = mainWidth
+			m.viewport.Height = mainHeight
 		}
+		m.textInput.Width = max(msg.Width-2, 20)
 		// Update renderer width without re-querying terminal
 		style := "light"
 		if m.isDark {
@@ -505,7 +805,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.renderer, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle(style),
-			glamour.WithWordWrap(msg.Width-4),
+			glamour.WithWordWrap(max(mainWidth-4, 20)),
 		)
 		return m, nil
 
@@ -542,8 +842,19 @@ func (m model) View() string {
 	}
 
 	var s string
-	width := m.viewport.Width
-	s += m.viewport.View() + "\n\n"
+	width := m.termWidth
+	if width <= 0 {
+		width = m.viewport.Width
+	}
+
+	toolWidth := toolPanelWidthForTerminal(width)
+	if toolWidth > 0 {
+		gap := strings.Repeat(" ", panelGapWidth)
+		panel := m.renderToolPanel(toolWidth, m.viewport.Height)
+		s += lipgloss.JoinHorizontal(lipgloss.Top, m.viewport.View(), gap, panel) + "\n\n"
+	} else {
+		s += m.viewport.View() + "\n\n"
+	}
 	s += dividerStyle.Render(dividerLine(width)) + "\n"
 	s += m.renderFooterMetaLine(width) + "\n"
 
@@ -712,12 +1023,13 @@ func (m *model) handleAgentEvent(ev agent.Event) {
 		m.refreshViewport(false)
 
 	case agent.EventToolStart:
-		header := toolStyle.Render(fmt.Sprintf("[%s] args:", ev.Tool.Call.Name))
-		body := toolJSONStyle.Copy().Width(m.viewport.Width).Render(formatToolCallArguments(ev.Tool.Call))
-		m.messages = append(m.messages, header+"\n"+body+"\n")
+		id := m.startToolPanelID(ev.Tool)
+		m.upsertToolPanelItem(id, ev.Tool)
 		m.refreshViewport(false)
 
 	case agent.EventToolEnd:
+		id := m.endToolPanelID(ev.Tool)
+		m.upsertToolPanelItem(id, ev.Tool)
 		m.toolCalls++
 		if ev.Tool.IsCached {
 			m.cacheHits++
@@ -1234,4 +1546,3 @@ func saveHistory(input string) {
 		slog.Warn("failed to write to history file", "file", histFile, "error", err)
 	}
 }
-

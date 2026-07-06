@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gorilla/websocket"
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
 	goai "github.com/zendev-sh/goai"
 	goaimcp "github.com/zendev-sh/goai/mcp"
 	"github.com/zendev-sh/goai/provider"
-	"github.com/gorilla/websocket"
-	"github.com/mfranz/elastic-security-mcp/internal/agent"
 )
 
 //go:embed assets/*
@@ -97,6 +97,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.sendMessage(conn, WebMessage{Type: "setup", Model: s.modelName})
 
 	history := []provider.Message{}
+	toolIDs := newToolIDAssigner()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -113,6 +114,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		if req.Type == "reset" {
 			history = []provider.Message{}
+			toolIDs = newToolIDAssigner()
 			s.sendMessage(conn, WebMessage{Type: "system", Content: "New session started. Previous context cleared."})
 			s.sendMessage(conn, WebMessage{Type: "clear_status"})
 			continue
@@ -137,14 +139,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.sendMessage(conn, WebMessage{Type: "user", Content: userInput})
 			history = append(history, goai.UserMessage(userInput))
 
-			s.processConversation(r.Context(), conn, &history)
+			s.processConversation(r.Context(), conn, &history, toolIDs)
 		}
 	}
 }
 
-func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]provider.Message) {
+func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, history *[]provider.Message, toolIDs *toolIDAssigner) {
 	result := s.engine.Turn(ctx, *history, func(ev agent.Event) {
-		s.emitEvent(conn, ev)
+		s.emitEvent(conn, ev, toolIDs)
 	})
 	*history = result.History
 
@@ -157,16 +159,22 @@ func (s *Server) processConversation(ctx context.Context, conn *websocket.Conn, 
 // emitEvent translates an agent.Event into the WebSocket protocol, streaming
 // a "running" tool message before each call and a "completed"/"error" one
 // after, so the browser sees live per-tool progress.
-func (s *Server) emitEvent(conn *websocket.Conn, ev agent.Event) {
+func (s *Server) emitEvent(conn *websocket.Conn, ev agent.Event, toolIDs *toolIDAssigner) {
 	switch ev.Kind {
 	case agent.EventStatus:
 		s.sendMessage(conn, WebMessage{Type: "status", Content: ev.Status, Thinking: true})
 	case agent.EventToolStart, agent.EventToolEnd:
 		t := ev.Tool
+		var id string
+		if ev.Kind == agent.EventToolStart {
+			id = toolIDs.start(t.Call.ID)
+		} else {
+			id = toolIDs.end(t.Call.ID)
+		}
 		s.sendMessage(conn, WebMessage{
 			Type: "tool",
 			Tool: &ToolEvent{
-				ID:       t.Call.ID,
+				ID:       id,
 				Seq:      t.Seq,
 				Name:     t.Call.Name,
 				State:    t.State,
@@ -180,6 +188,39 @@ func (s *Server) emitEvent(conn *websocket.Conn, ev agent.Event) {
 	case agent.EventAssistant:
 		s.sendMessage(conn, WebMessage{Type: "assistant", Content: ev.Text})
 	}
+}
+
+// toolIDAssigner makes provider tool-call IDs unique for the lifetime of a
+// Web UI session. Some providers (Gemini in particular) fabricate a
+// call-index-based ID that resets to the same value on every round trip
+// (e.g. "call_search_elastic_0" for every single call), so the raw ID is not
+// a safe key for the browser to distinguish successive calls to the same
+// tool. Each EventToolStart mints a fresh suffix; the matching EventToolEnd
+// (always emitted for the same call before the next call starts, since the
+// engine executes tool calls synchronously) looks it back up so the start
+// and end events pair up under one card.
+type toolIDAssigner struct {
+	next   int
+	active map[string]string
+}
+
+func newToolIDAssigner() *toolIDAssigner {
+	return &toolIDAssigner{active: make(map[string]string)}
+}
+
+func (a *toolIDAssigner) start(callID string) string {
+	a.next++
+	id := fmt.Sprintf("%s#%d", callID, a.next)
+	a.active[callID] = id
+	return id
+}
+
+func (a *toolIDAssigner) end(callID string) string {
+	if id, ok := a.active[callID]; ok {
+		delete(a.active, callID)
+		return id
+	}
+	return callID
 }
 
 func (s *Server) sendMessage(conn *websocket.Conn, msg WebMessage) {

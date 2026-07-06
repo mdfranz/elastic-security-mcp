@@ -274,8 +274,6 @@ func hasSecurityConstraint(args SearchSecurityEventsArgs) bool {
 	return args.Text != "" || args.Start != "" || args.End != "" || args.IP != "" || args.SrcIP != "" || args.DstIP != "" || args.MAC != "" || args.Domain != "" || args.URL != "" || args.Dataset != ""
 }
 
-
-
 func buildSecuritySearchRequest(args SearchSecurityEventsArgs) *typedsearch.Request {
 	req := typedsearch.NewRequest()
 	req.Size = &args.Size

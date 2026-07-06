@@ -13,8 +13,8 @@ func IsRateLimitError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "429") || 
-		strings.Contains(msg, "rate limit") || 
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "rate limit") ||
 		strings.Contains(msg, "too many requests") ||
 		strings.Contains(msg, "overloaded")
 }

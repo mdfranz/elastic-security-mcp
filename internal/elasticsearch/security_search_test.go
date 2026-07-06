@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	esv8 "github.com/elastic/go-elasticsearch/v9"
 	typedsearch "github.com/elastic/go-elasticsearch/v9/typedapi/core/search"
@@ -302,5 +303,103 @@ func TestBuildTermQuerySpecialCases(t *testing.T) {
 	q = buildTermQuery("source.mac", "00:11:22*")
 	if q.Wildcard == nil {
 		t.Fatal("expected wildcard for MAC prefix")
+	}
+}
+
+func TestEscapeQueryStringValueEscapesAllSpecialChars(t *testing.T) {
+	// One of each character escapeQueryStringValue claims to handle, in the
+	// same order the function lists them, plus a leading backslash to check
+	// that escaping it first doesn't get re-escaped by a later replacement.
+	input := `\` + `"+-=&&||><!(){}[]^~:/`
+	got := escapeQueryStringValue(input)
+
+	// "&&" and "||" are escaped as whole two-char tokens (a single leading
+	// backslash), not char-by-char, since escapeQueryStringValue's special
+	// character list treats them as multi-char entries.
+	want := `\\` + `\"\+\-\=\&&\||\>\<\!\(\)\{\}\[\]\^\~\:\/`
+	if got != want {
+		t.Fatalf("escapeQueryStringValue(%q) = %q, want %q", input, got, want)
+	}
+
+	// A plain value with no special characters should be returned unchanged.
+	if got := escapeQueryStringValue("plain value with no special chars"); got != "plain value with no special chars" {
+		t.Errorf("escapeQueryStringValue(no special chars) = %q, want unchanged", got)
+	}
+}
+
+// TestTruncateSummaryUTF8Boundary pins today's byte-slicing behavior for
+// truncateSummary: it cuts at a fixed byte offset (217) regardless of rune
+// boundaries. With a string built entirely from 2-byte UTF-8 runes, the cut
+// point lands mid-rune and produces invalid UTF-8. This test documents that
+// behavior so a future rune-safe fix has a regression test to change
+// (see the rune-unsafety gotcha noted in internal/IMPL.md).
+func TestTruncateSummaryUTF8Boundary(t *testing.T) {
+	// "é" is 2 bytes (0xC3 0xA9) in UTF-8; 150 repeats = 300 bytes, well past
+	// the 220-byte threshold, with rune boundaries only at even byte offsets.
+	s := strings.Repeat("é", 150)
+
+	got := truncateSummary(s)
+
+	if len(got) != 220 {
+		t.Fatalf("len(got) = %d, want 220 (217 truncated bytes + \"...\")", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("got = %q, want it to end with \"...\"", got)
+	}
+	if utf8.ValidString(got) {
+		t.Fatalf("got = %q is valid UTF-8; expected the current byte-offset cut (217) to split a 2-byte rune and produce invalid UTF-8 — if this now passes, truncateSummary has become rune-safe and this test should be updated to assert validity instead", got)
+	}
+
+	// Below the 220-byte threshold, the string passes through unchanged.
+	short := strings.Repeat("é", 50) // 100 bytes
+	if got := truncateSummary(short); got != short {
+		t.Fatalf("truncateSummary(short) = %q, want unchanged %q", got, short)
+	}
+}
+
+func TestBuildSecuritySearchRequestMACURLAndDirectionalIPFilters(t *testing.T) {
+	req := buildSecuritySearchRequest(SearchSecurityEventsArgs{
+		Index:  "logs-*",
+		SrcIP:  "10.0.0.1",
+		DstIP:  "10.0.0.2",
+		MAC:    "00:11:22:33:44:55",
+		URL:    "https://example.org/path",
+		Domain: "example.org",
+	})
+
+	if req.Query == nil || req.Query.Bool == nil {
+		t.Fatal("expected bool query")
+	}
+
+	queryJSON := string(mustJSON(t, req.Query))
+	for _, want := range []string{
+		`"source.ip":{"value":"10.0.0.1"}`,
+		`"client.ip":{"value":"10.0.0.1"}`,
+		`"destination.ip":{"value":"10.0.0.2"}`,
+		`"server.ip":{"value":"10.0.0.2"}`,
+		`"source.mac":{"value":"00:11:22:33:44:55"}`,
+		`"destination.mac":{"value":"00:11:22:33:44:55"}`,
+		`"host.mac":{"value":"00:11:22:33:44:55"}`,
+		`"url.full":{"value":"https://example.org/path"}`,
+		`"url.full.keyword":{"value":"https://example.org/path"}`,
+	} {
+		if !strings.Contains(queryJSON, want) {
+			t.Errorf("query JSON = %s, want it to contain %s", queryJSON, want)
+		}
+	}
+
+	// SrcIP/DstIP must not bleed into each other's filter fields.
+	for _, unwanted := range []string{
+		`"destination.ip":{"value":"10.0.0.1"}`,
+		`"source.ip":{"value":"10.0.0.2"}`,
+	} {
+		if strings.Contains(queryJSON, unwanted) {
+			t.Errorf("query JSON = %s, did not want %s", queryJSON, unwanted)
+		}
+	}
+
+	// Each of SrcIP/DstIP/MAC/URL/Domain contributes its own filter clause.
+	if got := len(req.Query.Bool.Filter); got != 5 {
+		t.Fatalf("filter count = %d, want 5, filters: %s", got, queryJSON)
 	}
 }

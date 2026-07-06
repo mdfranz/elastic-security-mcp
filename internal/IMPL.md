@@ -66,7 +66,7 @@ Redis "entity index" — a rolling window of Zeek DNS activity backing `lookup_d
 - `indexSearchResult` (raw ES response) and `indexTypedSearchResult` (typed `search.Response`) both walk hits and call `indexZeekDNSHit` per hit inside a Redis pipeline, executed once at the end (batched).
 - `indexZeekDNSHit(ctx, pipe, source) bool`: **only indexes docs where `data_stream.dataset == "zeek.dns"`**, silently skipping everything else — the entity cache is DNS-only despite generic key naming. Parses `@timestamp` (RFC3339Nano, falls back to `time.Now()`); normalizes `dns.question.name` via `util.NormalizeDomain` (skips the hit entirely if empty). Writes up to 3 sorted sets per hit: `dns:name:<domain>`, `dns:ip:<resolved_ip>` (per resolved IP), `ip:seen:<src_ip>`. Each write does `ZAdd` → `ZRemRangeByRank` (trim beyond 500) → `Expire(entityTTL)` — **TTL resets on every write**, so continuously-queried domains never expire; only stale entries roll off.
 
-No dedicated test file — the DNS extraction logic is untested directly.
+Tested by `indexer_test.go` against a real `*redis.Client` pointed at an in-process `miniredis` server (`github.com/alicebob/miniredis/v2`) rather than a fake interface — exercises the actual pipeline/`ZAdd`/`ZRemRangeByRank`/`Expire` sequence: `TestIndexSearchResultOnlyIndexesZeekDNSDataset`, `TestIndexZeekDNSHitNormalizesDomain`, `TestIndexZeekDNSHitPopulatesResolvedIPAndSourceIP`, `TestIndexZeekDNSHitInvalidTimestampFallsBackToNow`, `TestIndexZeekDNSHitTrimsToMaxEntityHistory`, `TestIndexZeekDNSHitAppliesAndRefreshesTTL` (confirms the TTL-reset-on-every-write gotcha above), `TestIndexTypedSearchResultNilResponseNoop`, `TestIndexTypedSearchResultSkipsMalformedSource`, `TestIndexTypedSearchResultIndexesValidZeekDNSHit`.
 
 ### process_search.go
 Implements `search_processes` against endpoint process events.
@@ -117,7 +117,7 @@ Key package vars: `securityTextFields` (boosted multi-match fields for free text
   - Progress reported via the injected `reportProgress` closure before start, after each batch, and at completion.
 - `buildExportSearchRequest`: distinct from the interactive request builder — no `_source` filter (full docs), no highlight, no sort (scroll doesn't need a tiebreaker).
 
-Tested by `security_search_test.go`: constraint validation, request building (text+filters, filter-only sort), response shaping/highlight fallback, summary fallback, an httptest-backed end-to-end run, and `buildTermQuery`'s CIDR/wildcard/plain-term branches.
+Tested by `security_search_test.go`: constraint validation, request building (text+filters, filter-only sort, and MAC/URL/SrcIP/DstIP filters via `TestBuildSecuritySearchRequestMACURLAndDirectionalIPFilters` — confirms SrcIP/DstIP don't bleed into each other's ES fields), response shaping/highlight fallback, summary fallback, an httptest-backed end-to-end run, `buildTermQuery`'s CIDR/wildcard/plain-term branches, `escapeQueryStringValue` (`TestEscapeQueryStringValueEscapesAllSpecialChars` — every special char, plus the multi-char `&&`/`||` tokens escaped as a unit rather than per-character), and `truncateSummary`'s byte-slicing behavior (`TestTruncateSummaryUTF8Boundary` — pins the current rune-unsafe cut as a regression test rather than fixing it; a 2-byte-rune string is deliberately sized so the 217-byte cutoff lands mid-rune and produces invalid UTF-8, per the rune-unsafety gotcha above).
 
 ### tools.go
 Registers `search_elastic`, `list_indices`, `cluster_health`, `lookup_domain`, `lookup_ip`; defines shared config/helpers for the whole package.
