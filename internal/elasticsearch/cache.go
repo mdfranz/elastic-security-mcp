@@ -181,7 +181,7 @@ func WrapWithCache[A any](
 			return &mcp.CallToolResult{
 				Meta: mcp.Meta{"cache_status": "hit"},
 				Content: []mcp.Content{
-					&mcp.TextContent{Text: text},
+					&mcp.TextContent{Text: "✓ " + text},
 				},
 			}, nil, nil
 		}
@@ -200,6 +200,7 @@ func WrapWithCache[A any](
 					result.Meta = mcp.Meta{}
 				}
 				result.Meta["cache_status"] = "stored"
+				txt.Text = "↓ " + txt.Text
 			}
 		}
 		return result, extra, nil

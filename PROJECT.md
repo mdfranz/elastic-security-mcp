@@ -94,6 +94,30 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
+## Phase 6: Engine Unification, Observability & Test Coverage (Commits 56473c1 → 415cabd)
+
+**Theme:** Shared logic consolidation, test automation, and runtime observability
+
+### Key Accomplishments
+- **Engine Unification**: Centralized the LLM tool-calling and sequential tool execution loop from duplicated implementations in the CLI TUI (`cmd/cli/main.go`) and Web UI (`internal/webui/server.go`) into a unified, reusable `internal/agent.Engine` package.
+- **LLM Observability Hooks**: Implemented the `internal/llmobs` package to register lifecycle hooks for logging LLM requests, latency, token usage, and error statuses via standard structured logging (`slog`).
+- **Comprehensive Unit Testing**: Formulated a structured testing plan in `docs/TEST-COVERAGE-PLAN.md` and implemented robust unit tests (Phases 1, 2, 3, 5, and 6) covering:
+  - **Shared Agent Engine**: Cache-prefix parsing, tool-call summaries, multi-block text joining, stalling detection, and history rendering.
+  - **Elasticsearch Search Tools**: Query construction logic, text+filter sorting, and MAC/URL/directional IP filters, plus regression tests for summary UTF-8 truncation boundaries.
+  - **Kibana Wrappers**: Fleet agents, Kibana spaces, and detection rules path/method construction and error response formatting.
+  - **CLI State & Helpers**: Model-provider parsing, input history deduplication, readline-style browse boundaries, and nested-JSON argument formatting.
+- **In-Memory Redis Testing**: Leveraged `github.com/alicebob/miniredis/v2` to thoroughly test the passive DNS indexer (Zeek DNS event filtering, domain normalization, sorted-set population, and TTL refreshes) without a live Redis cluster.
+- **Graceful Lifecycle Management**: Implemented signal-aware graceful shutdown handling to cleanly remove lock files on termination and registered Linux parent death signals (`PR_SET_PDEATHSIG`) to avoid orphaned daemon processes.
+- **Python Integration Support**: Configured `uv` with a `pyproject.toml` and test harness to support Pydantic AI integration and experimental Python script verification alongside the Go MCP server.
+
+### Technical Decisions
+- **Decoupled Engine Core**: Refactored the core agent loop to emit protocol-neutral UI events (`agent.Event`), allowing frontend clients (WebSocket and Bubble Tea TUI) to serve as pure adapters.
+- **Defensive History Sharing**: Implemented defensive deep-copying of the conversation history inside the background agent loop (`Engine.Turn`) to prevent data race conflicts with the TUI update threads.
+- **Isolate Request Building for Tests**: Extracted query construction logic from network-bound handlers into pure functions (e.g. `buildProcessSearchRequest`), enabling table-driven unit tests without running live Elasticsearch instances.
+- **In-Process Redis Fakes**: Chose `miniredis` over mocking interfaces or spinning up live test containers, ensuring fast and deterministic execution of pipeline/TTL logic in local development.
+
+---
+
 ## Architectural Themes
 
 ### 1. **Client-Server Separation (MCP)**
@@ -116,8 +140,11 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 ### Tools
 - **list_indices**: Pattern-based index listing with health/size stats.
 - **search_security_events**: ECS search with CIDR, MAC, and Wildcard support.
-- **lookup_domain / lookup_ip**: Redis-backed entity lookups.
-- **search_elastic**: Raw JSON DSL search.
+- **search_processes**: Endpoint process event search with process/parent filters.
+- **search_security_alerts**: Query and filter detection alerts from Elastic Security rules.
+- **lookup_domain / lookup_ip**: Redis-backed sub-millisecond passive entity lookup.
+- **search_elastic**: Raw JSON Query DSL search with automatic collapse-recovery retry.
+- **Kibana Tools**: Manage detection rules (`list_detection_rules`, `get_detection_rule`), spaces (`list_kibana_spaces`), agents (`list_agents`), or send arbitrary calls via `kibana_api_request`.
 
 ### Configuration
 - `ELASTIC_MODEL`: Default LLM.
@@ -128,6 +155,8 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 ---
 
 ## Future Work
+- **Phase 4 Testing (Utility Edge Cases)**: Implement unit tests for `internal/util/retry_test.go`, logging utilities, and environment variable configuration overrides.
+- **Stall-Retry Limits**: Introduce a bounded turn/iteration count on the agent engine execution loop to cleanly recover from repetitive LLM stalling.
 - **Token-Aware Pruning**: Moving from message counts to actual token counting.
 - **Multi-Cluster Support**: Federation across multiple Elastic clusters.
 - **Automated Reporting**: Generation of PDF/HTML security reports from session history.

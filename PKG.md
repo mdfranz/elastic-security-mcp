@@ -15,8 +15,7 @@ This document lists and classifies the 3rd party dependencies used in the `elast
 *   **[github.com/redis/go-redis/v9](https://github.com/redis/go-redis)**: Type-safe Redis client for Go. `internal/elasticsearch/cache.go` uses it to cache MCP tool results by hashed arguments and TTL, while `internal/elasticsearch/indexer.go` uses Redis sorted sets to build short-lived entity lookups from Zeek DNS hits such as domain-to-IP and IP-to-domain history.
 
 ## LLM & AI
-*   **[github.com/tmc/langchaingo](https://github.com/tmc/langchaingo)**: Go implementation of LangChain for LLM orchestration. This repo uses its `llms` abstractions and tool-call types as the common interface across OpenAI, Anthropic, and the custom Gemini adapter, and uses `memory.ConversationBuffer` in both the TUI and Web UI to preserve conversational context between turns.
-*   **[google.golang.org/api](https://google.golang.org/api)**: Google Cloud APIs for Go. In practice this repo only imports `googleapi.Error` to normalize Gemini API failures in `internal/llm/gemini_model.go` and in the CLI model selection path; the Gemini request/response flow itself is implemented manually with `net/http`.
+*   **[github.com/mozilla-ai/any-llm-go](https://github.com/mozilla-ai/any-llm-go)**: Go library for unified LLM provider integration. It is used as the core LLM orchestration layer in this project, replacing `langchaingo` to interface directly with OpenAI, Anthropic, and Gemini (supporting thought signatures natively).
 
 ## Command Line Interface (CLI)
 

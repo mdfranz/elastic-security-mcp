@@ -9,17 +9,16 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/tmc/langchaingo/llms"
+	"github.com/zendev-sh/goai/provider"
+
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
 )
 
 func setupTestServer() *Server {
 	return &Server{
-		mcpSession: nil,
-		llmClient:  nil,
-		lcTools:    []llms.Tool{},
-		modelName:  "test-model",
-		useMemory:  false,
+		engine:    agent.New(nil, nil, nil, "test-model"),
+		modelName: "test-model",
+		useMemory: false,
 	}
 }
 
@@ -170,93 +169,14 @@ func TestToolEventSerialization(t *testing.T) {
 	}
 }
 
-func TestSummarizeToolCalls(t *testing.T) {
-	tests := []struct {
-		name      string
-		toolCalls []llms.ToolCall
-		wantLen   int
-		wantWords []string
-	}{
-		{
-			name:      "Empty tool calls",
-			toolCalls: []llms.ToolCall{},
-			wantWords: []string{"Waiting"},
-		},
-		{
-			name: "Single tool call",
-			toolCalls: []llms.ToolCall{
-				{
-					FunctionCall: &llms.FunctionCall{
-						Name: "search",
-					},
-				},
-			},
-			wantWords: []string{"Running", "search"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := summarizeToolCalls(tt.toolCalls)
-			for _, word := range tt.wantWords {
-				if !strings.Contains(result, word) {
-					t.Errorf("Expected %q to contain %q", result, word)
-				}
-			}
-		})
-	}
-}
-
-func TestExtractToolContent(t *testing.T) {
-	tests := []struct {
-		name     string
-		toolResp *mcp.CallToolResult
-		want     string
-	}{
-		{
-			name:     "Nil response",
-			toolResp: nil,
-			want:     "",
-		},
-		{
-			name:     "Empty response",
-			toolResp: &mcp.CallToolResult{},
-			want:     "",
-		},
-		{
-			name: "Text content",
-			toolResp: &mcp.CallToolResult{
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "result text"},
-				},
-			},
-			want: "result text",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractToolContent(tt.toolResp)
-			if result != tt.want {
-				t.Errorf("extractToolContent() = %q, want %q", result, tt.want)
-			}
-		})
-	}
-}
+// summarizeToolCalls and extractToolText moved to internal/agent; see
+// TestSummarizeToolCalls and TestExtractToolText there.
 
 func TestConversationHistoryInitialization(t *testing.T) {
-	history := newConversationHistory()
+	history := []provider.Message{}
 
-	if len(history) != 1 {
-		t.Errorf("Expected 1 message in history, got %d", len(history))
-	}
-
-	if history[0].Role != llms.ChatMessageTypeSystem {
-		t.Errorf("Expected system role, got %v", history[0].Role)
-	}
-
-	if len(history[0].Parts) == 0 {
-		t.Error("Expected system prompt content")
+	if len(history) != 0 {
+		t.Errorf("Expected 0 messages in history, got %d", len(history))
 	}
 }
 
@@ -276,7 +196,7 @@ func TestWebSocketResetCommand(t *testing.T) {
 
 	ws.SetReadDeadline(time.Now().Add(time.Second))
 
-	_ = ws.ReadJSON(&WebMessage{}) // Read setup message
+	_ = ws.ReadJSON(&WebMessage{}) // consume setup message
 
 	resetMsg := WebMessage{Type: "reset"}
 	if err := ws.WriteJSON(resetMsg); err != nil {

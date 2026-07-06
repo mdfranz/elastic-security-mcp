@@ -2,17 +2,18 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -21,38 +22,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mfranz/elastic-security-mcp/internal/llm"
+	"github.com/mfranz/elastic-security-mcp/internal/agent"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/mfranz/elastic-security-mcp/internal/webui"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/llms/openai"
-	"github.com/tmc/langchaingo/memory"
-	"google.golang.org/api/googleapi"
+	goai "github.com/zendev-sh/goai"
+	goaimcp "github.com/zendev-sh/goai/mcp"
+	"github.com/zendev-sh/goai/provider"
+	"github.com/zendev-sh/goai/provider/anthropic"
+	"github.com/zendev-sh/goai/provider/google"
+	"github.com/zendev-sh/goai/provider/openai"
 )
 
-const systemPrompt = `You are a silent Elastic Security analyst tool.
-YOUR ONLY JOB IS TO CALL TOOLS.
-NEVER explain what you are doing.
-NEVER say "I will search" or "Let me check" or "Now I'll".
-DO NOT PROVIDE ANY TEXT UNTIL YOU HAVE THE RESULTS.
-ALWAYS use Markdown tables for tabular data.
-
-TOOL SELECTION GUIDE — call the right tool immediately:
-- search_security_alerts: detection alerts from Elastic Security rules
-- search_processes: endpoint process events (automatically searches logs-endpoint.events.process-*)
-- search_security_events: network and endpoint events — use index logs-zeek.*-* for Zeek, logs-suricata.*-* for Suricata, packetbeat-* for Packetbeat, logs-endpoint.events.network-* or logs-endpoint.events.file-* for endpoint
-- list_indices: discover available indices before searching if unsure
-- list_detection_rules / get_detection_rule: inspect or browse detection rules
-- list_agents: check Elastic Agent / Fleet status
-- lookup_domain / lookup_ip: fast DNS history lookup from cache
-- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
-- kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
-
-const maxLoggedPayloadChars = 4000
 const maxHistoryMessages = 15
+const footerReserveLines = 9
+const maxToolPanelItems = 24
+const minToolPanelTerminalWidth = 110
+const minToolPanelWidth = 36
+const maxToolPanelWidth = 48
+const panelGapWidth = 2
 
 // Styles
 var (
@@ -70,6 +58,10 @@ var (
 			Foreground(lipgloss.Color("#5F00FF"))
 
 	toolStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#00D787")).
+			Bold(true)
+
+	toolJSONStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#878787")).
 			Italic(true)
 
@@ -77,26 +69,79 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#B85F00"))
 
+	dividerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#5F87AF"))
+
+	footerLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6D7E97"))
+
+	footerValueStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#E6EEF8"))
+
+	footerSeparatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#5F87AF"))
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF0000"))
 
 	systemStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#A8A8A8"))
+
+	toolPanelTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#E6EEF8"))
+
+	toolPanelMetaStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6D7E97"))
+
+	toolPanelCardStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#3D536A")).
+				Padding(0, 1)
+
+	toolPanelRunningStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFD59A")).
+				Bold(true)
+
+	toolPanelCompletedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#9BF4CB")).
+				Bold(true)
+
+	toolPanelErrorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFC1C1")).
+				Bold(true)
 )
 
-// Messages
-type generateMsg struct{}
-type llmResponseMsg struct {
-	resp *llms.ContentResponse
+// agentEvent wraps an agent.Event for the Bubble Tea message chain. A
+// background goroutine (started by startTurn) pushes these onto a channel as
+// the shared agent.Engine progresses through a turn; Update drains one at a
+// time via waitForAgentEvent so the TUI can render incremental tool-call
+// progress instead of waiting for the whole turn to finish. done/result are
+// set on the final value sent before the channel is closed.
+type agentEvent struct {
+	ev     agent.Event
+	done   bool
+	result agent.TurnResult
 }
-type executeToolsMsg struct {
-	toolCalls []llms.ToolCall
+
+type exportMessage struct {
+	role    string
+	content string
 }
-type toolsResultMsg struct {
-	results []llms.ContentPart
-}
-type errMsg struct {
-	err error
+
+type toolPanelItem struct {
+	id            string
+	seq           int
+	name          string
+	state         string
+	argsSummary   string
+	argsDetail    string
+	resultPreview string
+	isError       bool
+	isCached      bool
+	isStored      bool
 }
 
 type focusArea int
@@ -107,18 +152,16 @@ const (
 )
 
 type model struct {
-	ctx        context.Context
-	mcpSession *mcp.ClientSession
-	llmClient  llms.Model
-	lcTools    []llms.Tool
-	history    []llms.MessageContent
-	modelName  string
-	mem        *memory.ConversationBuffer
-	useMemory  bool
-	lastInput  string
-	inputHist  []string
-	histIndex  int
-	histDraft  string
+	ctx       context.Context
+	engine    *agent.Engine
+	events    chan agentEvent
+	history   []provider.Message
+	modelName string
+	useMemory bool
+	lastInput string
+	inputHist []string
+	histIndex int
+	histDraft string
 
 	viewport  viewport.Model
 	textInput textinput.Model
@@ -127,16 +170,27 @@ type model struct {
 	isDark    bool
 	focus     focusArea
 
-	messages   []string
-	isThinking bool
-	statusText string
-	err        error
-	ready      bool
+	messages     []string
+	conversation []exportMessage
+	isThinking   bool
+	statusText   string
+	toolCalls    int
+	cacheHits    int
+	cacheMisses  int
+	cacheStores  int
+	toolErrors   int
+	toolPanel    []toolPanelItem
+	toolIndex    map[string]int
+	nextToolID   int
+	activeToolID map[string]string
+	termWidth    int
+	err          error
+	ready        bool
 }
 
-func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.Model, tools []llms.Tool, modelName string, useMemory bool) model {
+func initialModel(ctx context.Context, mcpClient *goaimcp.Client, llmModel provider.LanguageModel, tools []goai.Tool, modelName string, useMemory bool) model {
 	ti := textinput.New()
-	ti.Placeholder = "Ask about security data... (Up/Down history, PgUp/PgDn scroll)"
+	ti.Placeholder = "Ask about security data..."
 	ti.Focus()
 	ti.CharLimit = 1024
 	ti.Width = 80
@@ -157,31 +211,21 @@ func initialModel(ctx context.Context, session *mcp.ClientSession, client llms.M
 	)
 
 	return model{
-		ctx:        ctx,
-		mcpSession: session,
-		llmClient:  client,
-		lcTools:    tools,
-		modelName:  modelName,
-		mem:        memory.NewConversationBuffer(),
-		useMemory:  useMemory,
-		inputHist:  loadHistory(),
-		histIndex:  -1,
-		textInput:  ti,
-		spinner:    s,
-		renderer:   renderer,
-		isDark:     isDark,
-		focus:      focusInput,
-		history: []llms.MessageContent{
-			{
-				Role:  llms.ChatMessageTypeSystem,
-				Parts: []llms.ContentPart{llms.TextContent{Text: systemPrompt}},
-			},
-		},
-		messages: []string{
-			titleStyle.Render("Elastic Security Assistant"),
-			systemStyle.Render(fmt.Sprintf("Model: %s", modelName)),
-			"",
-		},
+		ctx:          ctx,
+		engine:       agent.New(mcpClient, llmModel, tools, modelName),
+		modelName:    modelName,
+		useMemory:    useMemory,
+		inputHist:    loadHistory(),
+		histIndex:    -1,
+		textInput:    ti,
+		spinner:      s,
+		renderer:     renderer,
+		isDark:       isDark,
+		focus:        focusInput,
+		history:      []provider.Message{},
+		messages:     []string{},
+		toolIndex:    make(map[string]int),
+		activeToolID: make(map[string]string),
 	}
 }
 
@@ -200,30 +244,374 @@ func (m *model) refreshViewport(follow bool) {
 	}
 }
 
-func summarizeToolCalls(toolCalls []llms.ToolCall) string {
-	if len(toolCalls) == 0 {
-		return "Waiting for assistant response..."
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
 	}
 
-	names := make([]string, 0, len(toolCalls))
-	for _, tc := range toolCalls {
-		name := toolCallName(tc)
-		if name == "(missing)" {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func shouldShowToolPanel(width int) bool {
+	return width >= minToolPanelTerminalWidth
+}
+
+func toolPanelWidthForTerminal(width int) int {
+	if !shouldShowToolPanel(width) {
+		return 0
+	}
+	return clampInt(width/3, minToolPanelWidth, maxToolPanelWidth)
+}
+
+func dividerLine(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return strings.Repeat(lipgloss.NormalBorder().Top, width)
+}
+
+func exportLabel(role string) string {
+	switch role {
+	case "user":
+		return "You"
+	case "assistant":
+		return "Assistant"
+	case "system":
+		return "System"
+	default:
+		return role
+	}
+}
+
+func toolCallKey(t *agent.ToolCallEvent) string {
+	if t == nil {
+		return ""
+	}
+	if t.Call.ID != "" {
+		return t.Call.ID
+	}
+	return fmt.Sprintf("%s#%d", t.Call.Name, t.Seq)
+}
+
+func (m *model) startToolPanelID(t *agent.ToolCallEvent) string {
+	if m.activeToolID == nil {
+		m.activeToolID = make(map[string]string)
+	}
+	m.nextToolID++
+	raw := toolCallKey(t)
+	id := fmt.Sprintf("%s#%d", raw, m.nextToolID)
+	m.activeToolID[raw] = id
+	return id
+}
+
+func (m *model) endToolPanelID(t *agent.ToolCallEvent) string {
+	if m.activeToolID == nil {
+		m.activeToolID = make(map[string]string)
+	}
+	raw := toolCallKey(t)
+	if id, ok := m.activeToolID[raw]; ok {
+		delete(m.activeToolID, raw)
+		return id
+	}
+	return raw
+}
+
+func summarizeToolArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return "No arguments."
+	}
+
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, min(len(keys), 3))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %s", key, summarizeToolValue(args[key])))
+		if len(parts) == 3 {
+			break
+		}
+	}
+	if len(keys) > len(parts) {
+		parts = append(parts, fmt.Sprintf("+%d", len(keys)-len(parts)))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func summarizeToolValue(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return "null"
+	case []any:
+		return fmt.Sprintf("[%d]", len(v))
+	case map[string]any:
+		return "{...}"
+	default:
+		text := strings.Join(strings.Fields(fmt.Sprint(v)), " ")
+		return truncateRunes(text, 42)
+	}
+}
+
+func summarizeToolResult(result string) string {
+	for _, line := range strings.Split(result, "\n") {
+		normalized := strings.Join(strings.Fields(line), " ")
+		if normalized != "" {
+			return truncateRunes(normalized, 72)
+		}
+	}
+	return "No textual result."
+}
+
+func (m *model) upsertToolPanelItem(id string, t *agent.ToolCallEvent) {
+	if t == nil || id == "" {
+		return
+	}
+
+	item := toolPanelItem{
+		id:          id,
+		seq:         t.Seq,
+		name:        t.Call.Name,
+		state:       t.State,
+		argsSummary: summarizeToolArgs(t.Args),
+		argsDetail:  formatToolCallArguments(t.Call),
+		isError:     t.IsError,
+		isCached:    t.IsCached,
+		isStored:    t.IsStored,
+	}
+	if strings.TrimSpace(t.Result) != "" {
+		item.resultPreview = summarizeToolResult(t.Result)
+	}
+
+	if idx, ok := m.toolIndex[id]; ok && idx >= 0 && idx < len(m.toolPanel) {
+		existing := m.toolPanel[idx]
+		if item.name == "" {
+			item.name = existing.name
+		}
+		if item.argsSummary == "No arguments." && existing.argsSummary != "" {
+			item.argsSummary = existing.argsSummary
+		}
+		if item.argsDetail == "{}" && existing.argsDetail != "" {
+			item.argsDetail = existing.argsDetail
+		}
+		m.toolPanel[idx] = item
+		return
+	}
+
+	m.toolPanel = append([]toolPanelItem{item}, m.toolPanel...)
+	if len(m.toolPanel) > maxToolPanelItems {
+		m.toolPanel = m.toolPanel[:maxToolPanelItems]
+	}
+	m.reindexToolPanel()
+}
+
+func (m *model) reindexToolPanel() {
+	if m.toolIndex == nil {
+		m.toolIndex = make(map[string]int)
+	}
+	clear(m.toolIndex)
+	for i, item := range m.toolPanel {
+		m.toolIndex[item.id] = i
+	}
+}
+
+func (m *model) clearToolPanel() {
+	m.toolPanel = nil
+	m.reindexToolPanel()
+	m.activeToolID = make(map[string]string)
+}
+
+func buildMarkdownExport(conversation []exportMessage, exportedAt time.Time) string {
+	var b strings.Builder
+	b.WriteString("# Elastic Security Investigation Export\n\n")
+	b.WriteString(fmt.Sprintf("*Exported on: %s*\n\n---\n\n", exportedAt.Format(time.RFC1123)))
+	for _, msg := range conversation {
+		b.WriteString(fmt.Sprintf("**%s:**\n%s\n\n", exportLabel(msg.role), msg.content))
+	}
+	return b.String()
+}
+
+func exportFilename(now time.Time) string {
+	return fmt.Sprintf("investigation-export-%s.md", now.Format("2006-01-02T15-04-05"))
+}
+
+func normalizeMarkdownForTerminal(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == "" {
 			continue
 		}
-		names = append(names, name)
+
+		hashes := 0
+		for hashes < len(trimmed) && hashes < 6 && trimmed[hashes] == '#' {
+			hashes++
+		}
+		if hashes == 0 || hashes >= len(trimmed) || trimmed[hashes] != ' ' {
+			continue
+		}
+
+		indent := len(line) - len(trimmed)
+		lines[i] = strings.Repeat(" ", indent) + strings.TrimSpace(trimmed[hashes:])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *model) appendConversation(role, content string) {
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+	m.conversation = append(m.conversation, exportMessage{
+		role:    role,
+		content: content,
+	})
+}
+
+func (m *model) exportConversation() error {
+	if len(m.conversation) == 0 {
+		return errors.New("no conversation to export")
 	}
 
-	switch len(names) {
-	case 0:
-		return fmt.Sprintf("Running %d tool call(s)...", len(toolCalls))
-	case 1:
-		return fmt.Sprintf("Running `%s`...", names[0])
-	case 2:
-		return fmt.Sprintf("Running `%s` and `%s`...", names[0], names[1])
-	default:
-		return fmt.Sprintf("Running %d tool calls (%s, %s, ...)...", len(names), names[0], names[1])
+	now := time.Now()
+	filename := exportFilename(now)
+	path, err := filepath.Abs(filename)
+	if err != nil {
+		return fmt.Errorf("resolve export path: %w", err)
 	}
+
+	md := buildMarkdownExport(m.conversation, now)
+	if err := os.WriteFile(path, []byte(md), 0644); err != nil {
+		return fmt.Errorf("write export: %w", err)
+	}
+
+	m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Export saved:"), path))
+	return nil
+}
+
+func footerMetaSegment(label string, value any) string {
+	return footerLabelStyle.Render(label+": ") + footerValueStyle.Render(fmt.Sprint(value))
+}
+
+func (m model) renderFooterMetaLine(width int) string {
+	session := "Ready"
+	if m.isThinking {
+		session = "Investigating"
+	}
+
+	memoryState := "Off"
+	if m.useMemory {
+		memoryState = "On"
+	}
+
+	parts := []string{
+		footerMetaSegment("Session", session),
+		footerMetaSegment("Model", m.modelName),
+		footerMetaSegment("Memory", memoryState),
+		footerMetaSegment("Tools", m.toolCalls),
+		footerMetaSegment("Cache", fmt.Sprintf("%d hit / %d miss / %d store / %d error", m.cacheHits, m.cacheMisses, m.cacheStores, m.toolErrors)),
+	}
+
+	line := strings.Join(parts, footerSeparatorStyle.Render("  "))
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
+}
+
+func toolStateLabel(item toolPanelItem) string {
+	if item.isCached && item.state == "completed" {
+		return "cached"
+	}
+	return item.state
+}
+
+func toolStateStyle(item toolPanelItem) lipgloss.Style {
+	if item.isError || item.state == "error" {
+		return toolPanelErrorStyle
+	}
+	if item.state == "running" {
+		return toolPanelRunningStyle
+	}
+	return toolPanelCompletedStyle
+}
+
+func renderToolPanelLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return lipgloss.NewStyle().Width(width).Render(truncateRunes(line, width))
+}
+
+func (m model) renderToolPanel(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+
+	innerWidth := max(width-4, 1)
+	lines := []string{
+		toolPanelTitleStyle.Render("Tool Activity"),
+		toolPanelMetaStyle.Render(fmt.Sprintf("%d total", len(m.toolPanel))),
+		"",
+	}
+
+	if len(m.toolPanel) == 0 {
+		lines = append(lines, toolPanelMetaStyle.Copy().Width(innerWidth).Render("Tool calls will appear here."))
+	} else {
+		for _, item := range m.toolPanel {
+			state := toolStateStyle(item).Render(toolStateLabel(item))
+			name := item.name
+			if name == "" {
+				name = "(unknown)"
+			}
+			if item.isStored {
+				state += toolPanelMetaStyle.Render(" store")
+			}
+			nameWidth := max(innerWidth-2-lipgloss.Width(state)-2, 1)
+			topLine := renderToolPanelLine(name, nameWidth) + "  " + state
+			cardLines := []string{
+				topLine,
+				toolPanelMetaStyle.Render(renderToolPanelLine(item.argsSummary, innerWidth-2)),
+			}
+			if item.resultPreview != "" {
+				cardLines = append(cardLines, toolPanelMetaStyle.Render(renderToolPanelLine(item.resultPreview, innerWidth-2)))
+			}
+
+			card := toolPanelCardStyle.Copy().Width(innerWidth).Render(strings.Join(cardLines, "\n"))
+			lines = append(lines, strings.Split(card, "\n")...)
+			lines = append(lines, "")
+		}
+	}
+
+	maxInnerHeight := max(height-2, 1)
+	if len(lines) > maxInnerHeight {
+		lines = lines[:maxInnerHeight]
+	}
+	for len(lines) < maxInnerHeight {
+		lines = append(lines, "")
+	}
+
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("#3D536A")).
+		PaddingLeft(1).
+		Render(strings.Join(lines, "\n"))
 }
 
 func (m *model) pushInputHistory(input string) {
@@ -275,9 +663,7 @@ func (m *model) pruneHistory() {
 	if len(m.history) <= maxHistoryMessages {
 		return
 	}
-	pruned := []llms.MessageContent{m.history[0]}
-	pruned = append(pruned, m.history[len(m.history)-maxHistoryMessages+1:]...)
-	m.history = pruned
+	m.history = m.history[len(m.history)-maxHistoryMessages:]
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -335,37 +721,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if input == "" {
 				return m, nil
 			}
+			// A turn is already in flight; ignore input until it settles so
+			// we don't start overlapping turns against the same history.
+			if m.isThinking {
+				return m, nil
+			}
 
 			// Handle /memory command
 			if input == "/memory" {
 				m.pushInputHistory(input)
 				m.textInput.SetValue("")
 				if !m.useMemory {
-					m.messages = append(m.messages, systemStyle.Render("Conversation memory is disabled."))
+					msg := "Conversation memory is disabled."
+					m.messages = append(m.messages, systemStyle.Render(msg))
+					m.appendConversation("system", msg)
 				} else {
-					vars, err := m.mem.LoadMemoryVariables(m.ctx, nil)
-					if err != nil {
-						m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Memory error: %v", err)))
-					} else {
-						hist, _ := vars["history"].(string)
-						if hist == "" {
-							hist = "(empty)"
-						}
-						m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Conversation Memory:"), hist))
+					hist := agent.RenderHistoryText(m.history)
+					if hist == "" {
+						hist = "(empty)"
 					}
+					msg := fmt.Sprintf("Conversation Memory:\n%s", hist)
+					m.messages = append(m.messages, fmt.Sprintf("%s\n%s", systemStyle.Render("Conversation Memory:"), hist))
+					m.appendConversation("system", msg)
+				}
+				m.refreshViewport(true)
+				return m, nil
+			}
+
+			if input == "/export" {
+				m.pushInputHistory(input)
+				m.textInput.SetValue("")
+				if err := m.exportConversation(); err != nil {
+					m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Export error: %v", err)))
 				}
 				m.refreshViewport(true)
 				return m, nil
 			}
 
 			// Wrap human input
-			wrappedUser := lipgloss.NewStyle().Width(m.viewport.Width - 10).Render(input)
+			m.clearToolPanel()
+			wrappedUser := lipgloss.NewStyle().Width(max(m.viewport.Width-10, 20)).Render(input)
 			m.messages = append(m.messages, fmt.Sprintf("%s %s", userStyle.Render("You:"), wrappedUser))
+			m.appendConversation("user", input)
 
-			m.history = append(m.history, llms.MessageContent{
-				Role:  llms.ChatMessageTypeHuman,
-				Parts: []llms.ContentPart{llms.TextContent{Text: input}},
-			})
+			m.history = append(m.history, goai.UserMessage(input))
 
 			if !m.useMemory {
 				m.pruneHistory()
@@ -378,19 +777,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "Analyzing request..."
 			m.refreshViewport(true)
 
-			return m, m.generateResponse()
+			return m, m.startTurn()
 		}
 
 	case tea.WindowSizeMsg:
+		m.termWidth = msg.Width
+		toolWidth := toolPanelWidthForTerminal(msg.Width)
+		mainWidth := msg.Width
+		if toolWidth > 0 {
+			mainWidth = max(msg.Width-toolWidth-panelGapWidth, 20)
+		}
+		mainHeight := max(msg.Height-footerReserveLines, 1)
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, msg.Height-8)
+			m.viewport = viewport.New(mainWidth, mainHeight)
 			m.viewport.HighPerformanceRendering = false
 			m.viewport.SetContent(strings.Join(m.messages, "\n"))
 			m.ready = true
 		} else {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - 8
+			m.viewport.Width = mainWidth
+			m.viewport.Height = mainHeight
 		}
+		m.textInput.Width = max(msg.Width-2, 20)
 		// Update renderer width without re-querying terminal
 		style := "light"
 		if m.isDark {
@@ -398,7 +805,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.renderer, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle(style),
-			glamour.WithWordWrap(msg.Width-4),
+			glamour.WithWordWrap(max(mainWidth-4, 20)),
 		)
 		return m, nil
 
@@ -406,115 +813,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, spCmd = m.spinner.Update(msg)
 		return m, spCmd
 
-	case llmResponseMsg:
-		if msg.resp == nil || len(msg.resp.Choices) == 0 {
-			m.err = errors.New("LLM returned no choices")
+	case agentEvent:
+		if msg.done {
+			m.history = msg.result.History
+			m.lastInput = ""
 			m.isThinking = false
 			m.statusText = ""
-			m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			if msg.result.Err != nil {
+				m.err = msg.result.Err
+				m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			}
 			m.refreshViewport(false)
 			return m, nil
 		}
 
-		choice := msg.resp.Choices[0]
-
-		// Add assistant turn to history
-		assistantParts := []llms.ContentPart{}
-		if choice.Content != "" {
-			assistantParts = append(assistantParts, llms.TextContent{Text: choice.Content})
-		}
-
-		for i := range choice.ToolCalls {
-			// Normalize tool calls for Gemini/etc. if IDs are missing
-			// Gemini often requires hexadecimal IDs
-			if choice.ToolCalls[i].ID == "" {
-				b := make([]byte, 8)
-				if _, err := rand.Read(b); err != nil {
-					m.err = fmt.Errorf("failed to create tool call ID: %w", err)
-					m.isThinking = false
-					m.statusText = ""
-					m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-					m.refreshViewport(false)
-					return m, nil
-				}
-				choice.ToolCalls[i].ID = hex.EncodeToString(b)
-			}
-			if choice.ToolCalls[i].Type == "" {
-				choice.ToolCalls[i].Type = "tool_call"
-			}
-			assistantParts = append(assistantParts, choice.ToolCalls[i])
-		}
-		m.history = append(m.history, llms.MessageContent{
-			Role:  llms.ChatMessageTypeAI,
-			Parts: assistantParts,
-		})
-
-		// Detect stalling
-		content := strings.ToLower(choice.Content)
-		if len(choice.ToolCalls) == 0 && (strings.Contains(content, "i will") ||
-			strings.Contains(content, "let me") ||
-			strings.Contains(content, "now i'll") ||
-			strings.Contains(content, "searching")) {
-
-			m.history = append(m.history, llms.MessageContent{
-				Role:  llms.ChatMessageTypeHuman,
-				Parts: []llms.ContentPart{llms.TextContent{Text: "Please proceed with the tool call immediately. Do not narrate your intent."}},
-			})
-			return m, m.generateResponse()
-		}
-
-		// Display content if any
-		if choice.Content != "" && len(choice.ToolCalls) == 0 {
-			rendered, err := m.renderer.Render(choice.Content)
-			if err != nil {
-				rendered = choice.Content
-			}
-			m.messages = append(m.messages, fmt.Sprintf("%s\n%s", assistantStyle.Render("Assistant:"), rendered))
-		}
-
-		// Handle tool calls
-		if len(choice.ToolCalls) > 0 {
-			m.statusText = summarizeToolCalls(choice.ToolCalls) + " Tool lines above are intermediate."
-			for _, tc := range choice.ToolCalls {
-				m.messages = append(m.messages, toolStyle.Copy().Width(m.viewport.Width-4).Render(fmt.Sprintf("  [%s] args: %s", toolCallName(tc), toolCallArguments(tc))))
-			}
-			m.refreshViewport(false)
-			return m, m.executeTools(choice.ToolCalls)
-		}
-
-		// Done — save completed turn to LangChain memory
-		if m.lastInput != "" {
-			if m.useMemory {
-				_ = m.mem.SaveContext(m.ctx,
-					map[string]any{"input": m.lastInput},
-					map[string]any{"output": choice.Content},
-				)
-			}
-			m.lastInput = ""
-		}
-		m.isThinking = false
-		m.statusText = ""
-		m.refreshViewport(false)
-		return m, nil
-
-	case toolsResultMsg:
-		for _, res := range msg.results {
-			m.history = append(m.history, llms.MessageContent{
-				Role:  llms.ChatMessageTypeTool,
-				Parts: []llms.ContentPart{res},
-			})
-		}
-		m.statusText = "Tool results received. Drafting final answer..."
-		m.refreshViewport(false)
-		return m, m.generateResponse()
-
-	case errMsg:
-		m.err = msg.err
-		m.isThinking = false
-		m.statusText = ""
-		m.messages = append(m.messages, errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-		m.refreshViewport(false)
-		return m, nil
+		m.handleAgentEvent(msg.ev)
+		return m, waitForAgentEvent(m.events)
 	}
 
 	m.textInput, tiCmd = m.textInput.Update(msg)
@@ -528,15 +842,35 @@ func (m model) View() string {
 	}
 
 	var s string
-	s += m.viewport.View() + "\n\n\n\n"
-	if m.isThinking {
-		status := m.statusText
-		if status == "" {
-			status = "Thinking..."
-		}
-		s += statusStyle.Render(m.spinner.View()+" "+status) + "\n"
+	width := m.termWidth
+	if width <= 0 {
+		width = m.viewport.Width
+	}
+
+	toolWidth := toolPanelWidthForTerminal(width)
+	if toolWidth > 0 {
+		gap := strings.Repeat(" ", panelGapWidth)
+		panel := m.renderToolPanel(toolWidth, m.viewport.Height)
+		s += lipgloss.JoinHorizontal(lipgloss.Top, m.viewport.View(), gap, panel) + "\n\n"
 	} else {
-		s += "\n"
+		s += m.viewport.View() + "\n\n"
+	}
+	s += dividerStyle.Render(dividerLine(width)) + "\n"
+	s += m.renderFooterMetaLine(width) + "\n"
+
+	status := m.statusText
+	if status == "" {
+		if m.isThinking {
+			status = "Thinking..."
+		} else {
+			status = "Ready for the next investigation."
+		}
+	}
+	if m.isThinking {
+		prefix := m.spinner.View() + " "
+		s += statusStyle.Render(prefix+truncateRunes(status, width-lipgloss.Width(prefix))) + "\n"
+	} else {
+		s += statusStyle.Render(truncateRunes(status, width)) + "\n"
 	}
 
 	help := "Up/Down: history  PgUp/PgDn: scroll  TAB: focus output"
@@ -549,215 +883,175 @@ func (m model) View() string {
 	return s
 }
 
-func toolCallName(tc llms.ToolCall) string {
-	if tc.FunctionCall == nil || tc.FunctionCall.Name == "" {
-		return "(missing)"
-	}
-	return tc.FunctionCall.Name
-}
-
-func toolCallArguments(tc llms.ToolCall) string {
-	if tc.FunctionCall == nil {
+func formatToolCallArguments(tc provider.ToolCall) string {
+	if len(tc.Input) == 0 {
 		return "{}"
 	}
-	if strings.TrimSpace(tc.FunctionCall.Arguments) == "" {
-		return "{}"
-	}
-	return tc.FunctionCall.Arguments
-}
 
-func extractToolContent(toolResp *mcp.CallToolResult) string {
-	if toolResp == nil {
-		return ""
+	var parsed map[string]any
+	if err := json.Unmarshal(tc.Input, &parsed); err != nil {
+		return string(tc.Input)
 	}
-	var sb strings.Builder
-	for _, c := range toolResp.Content {
-		if txt, ok := c.(*mcp.TextContent); ok {
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(txt.Text)
-		}
-	}
-	return sb.String()
-}
 
-func summarizeHistoryForLog(history []llms.MessageContent) string {
-	type partSummary map[string]any
-	type messageSummary map[string]any
-
-	summary := make([]messageSummary, 0, len(history))
-	for i, msg := range history {
-		parts := make([]partSummary, 0, len(msg.Parts))
-		for _, part := range msg.Parts {
-			switch p := part.(type) {
-			case llms.TextContent:
-				parts = append(parts, partSummary{
-					"type":    "text",
-					"chars":   len(p.Text),
-					"preview": util.TruncateForLog(p.Text, 160),
-				})
-			case llms.ToolCall:
-				parts = append(parts, partSummary{
-					"type":      "tool_call",
-					"name":      toolCallName(p),
-					"id":        p.ID,
-					"arg_chars": len(toolCallArguments(p)),
-					"args":      util.TruncateForLog(toolCallArguments(p), 240),
-				})
-			case llms.ToolCallResponse:
-				parts = append(parts, partSummary{
-					"type":         "tool_response",
-					"name":         p.Name,
-					"tool_call_id": p.ToolCallID,
-					"chars":        len(p.Content),
-					"preview":      util.TruncateForLog(p.Content, 240),
-				})
-			default:
-				parts = append(parts, partSummary{
-					"type": fmt.Sprintf("%T", part),
-				})
+	// Expand inner JSON strings (e.g. for search_elastic query field).
+	for k, v := range parsed {
+		if s, ok := v.(string); ok {
+			s = strings.TrimSpace(s)
+			if (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+				(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
+				var inner any
+				if err := json.Unmarshal([]byte(s), &inner); err == nil {
+					parsed[k] = inner
+				}
 			}
 		}
-		summary = append(summary, messageSummary{
-			"index": i,
-			"role":  msg.Role,
-			"parts": parts,
-		})
 	}
 
-	b, err := json.Marshal(summary)
+	formatted, err := json.MarshalIndent(parsed, "", " ")
 	if err != nil {
-		return fmt.Sprintf("failed to summarize history: %v", err)
+		return string(tc.Input)
 	}
-	return string(b)
+
+	lines := strings.Split(string(formatted), "\n")
+	if len(lines) <= 1 {
+		return string(formatted)
+	}
+
+	var result []string
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		if (trimmed == "}" || trimmed == "}," || trimmed == "]" || trimmed == "],") && len(result) > 0 {
+			result[len(result)-1] += " " + trimmed
+			continue
+		}
+		if (strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "[")) && i+1 < len(lines) {
+			nextLine := strings.TrimSpace(lines[i+1])
+			if nextLine == "}" || nextLine == "}," || nextLine == "]" || nextLine == "]," {
+				result = append(result, line+" "+nextLine)
+				i++
+				continue
+			}
+			result = append(result, line+" "+nextLine)
+			i++
+			continue
+		}
+		result = append(result, line)
+	}
+
+	var final []string
+	for _, line := range result {
+		trimmed := strings.TrimSpace(line)
+		if (trimmed == "}" || trimmed == "}," || trimmed == "]" || trimmed == "],") && len(final) > 0 {
+			final[len(final)-1] += " " + trimmed
+		} else {
+			final = append(final, line)
+		}
+	}
+
+	return strings.Join(final, "\n")
 }
 
-func (m model) generateResponse() tea.Cmd {
-	return func() tea.Msg {
-		slog.Debug("LLM request summary",
-			"model", m.modelName,
-			"tool_count", len(m.lcTools),
-			"message_count", len(m.history),
-			"summary", summarizeHistoryForLog(m.history),
-		)
-		if util.ClientPayloadLoggingEnabled() {
-			histJSON, err := json.Marshal(m.history)
-			if err == nil {
-				slog.Debug("Sending history to LLM", "history", util.TruncateForLog(string(histJSON), maxLoggedPayloadChars))
-			}
-			toolsJSON, err := json.Marshal(m.lcTools)
-			if err == nil {
-				slog.Debug("Sending tools to LLM", "tools", util.TruncateForLog(string(toolsJSON), maxLoggedPayloadChars))
+// stopServer asks the spawned elastic-mcp-server subprocess to shut down
+// gracefully (SIGTERM) before closing the MCP client. The goai StdioTransport's
+// Close() sends SIGKILL immediately, which never gives the server a chance to
+// run its deferred cleanup (removing its lock file), so we terminate it
+// ourselves first and only fall back to the transport's hard kill if it
+// doesn't exit in time.
+func stopServer(mcpClient *goaimcp.Client) {
+	if data, err := os.ReadFile(util.ServerLockFile()); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if proc, err := os.FindProcess(pid); err == nil {
+				proc.Signal(syscall.SIGTERM)
+				for i := 0; i < 20; i++ {
+					if proc.Signal(syscall.Signal(0)) != nil {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
 			}
 		}
+	}
+	mcpClient.Close()
+}
 
-		resp, err := util.WithRetry(m.ctx, func() (*llms.ContentResponse, error) {
-			return m.llmClient.GenerateContent(m.ctx, m.history,
-				llms.WithTools(m.lcTools),
-				llms.WithMaxTokens(4096),
-				llms.WithTemperature(0),
-			)
+// startTurn kicks off the shared agent.Engine in a background goroutine and
+// returns a Cmd that waits for the first Event it produces. The goroutine
+// pushes each Event onto m.events as it happens (tool call started, tool
+// call finished, status update, final assistant text) so the TUI can render
+// progress incrementally instead of waiting for the whole turn — matching
+// what internal/webui/server.go already does over the WebSocket, just
+// bridged through a channel since Bubble Tea's Update loop must stay
+// single-threaded and a Cmd can only return one message at a time.
+func (m *model) startTurn() tea.Cmd {
+	ch := make(chan agentEvent, 16)
+	m.events = ch
+
+	ctx := m.ctx
+	eng := m.engine
+	history := m.history
+
+	go func() {
+		result := eng.Turn(ctx, history, func(ev agent.Event) {
+			ch <- agentEvent{ev: ev}
 		})
-		if err != nil {
-			var gerr *googleapi.Error
-			if errors.As(err, &gerr) {
-				logAttrs := []any{
-					"model", m.modelName,
-					"status_code", gerr.Code,
-					"message", gerr.Message,
-				}
-				if util.ClientPayloadLoggingEnabled() {
-					logAttrs = append(logAttrs,
-						"body", util.TruncateForLog(gerr.Body, maxLoggedPayloadChars),
-						"details", fmt.Sprintf("%v", gerr.Details),
-						"headers", fmt.Sprintf("%v", gerr.Header),
-					)
-				}
-				slog.Error("Google API generation error details",
-					logAttrs...,
-				)
-			}
-			slog.Error("LLM generation error", "error", err)
-			return errMsg{err}
-		}
+		ch <- agentEvent{done: true, result: result}
+		close(ch)
+	}()
 
-		if util.ClientPayloadLoggingEnabled() {
-			respJSON, err := json.Marshal(resp)
-			if err == nil {
-				slog.Debug("Received LLM response", "response", util.TruncateForLog(string(respJSON), maxLoggedPayloadChars))
-			}
-		}
+	return waitForAgentEvent(ch)
+}
 
-		return llmResponseMsg{resp}
+func waitForAgentEvent(ch chan agentEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return ev
 	}
 }
 
-func (m model) executeTools(toolCalls []llms.ToolCall) tea.Cmd {
-	return func() tea.Msg {
-		toolResultParts := []llms.ContentPart{}
-		for _, tc := range toolCalls {
-			name := toolCallName(tc)
-			argsJSON := toolCallArguments(tc)
-			slog.Info("Executing tool", "name", name, "arg_chars", len(argsJSON), "id", tc.ID)
-			if util.ClientPayloadLoggingEnabled() {
-				slog.Debug("Tool arguments", "name", name, "args", util.TruncateForLog(argsJSON, maxLoggedPayloadChars))
-			}
+// handleAgentEvent renders one incremental agent.Event. It does not touch
+// m.isThinking/m.statusText's terminal state — that's handled by the
+// done-branch in Update once the whole turn finishes.
+func (m *model) handleAgentEvent(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventStatus:
+		m.statusText = ev.Status
+		m.refreshViewport(false)
 
-			if tc.FunctionCall == nil || tc.FunctionCall.Name == "" {
-				toolResultParts = append(toolResultParts, llms.ToolCallResponse{
-					ToolCallID: tc.ID,
-					Name:       name,
-					Content:    "invalid tool call: missing function name",
-				})
-				continue
-			}
+	case agent.EventToolStart:
+		id := m.startToolPanelID(ev.Tool)
+		m.upsertToolPanelItem(id, ev.Tool)
+		m.refreshViewport(false)
 
-			var args map[string]any
-			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-				toolResultParts = append(toolResultParts, llms.ToolCallResponse{
-					ToolCallID: tc.ID,
-					Name:       tc.FunctionCall.Name,
-					Content:    fmt.Sprintf("invalid tool arguments: %v", err),
-				})
-				continue
-			}
-
-			toolResp, err := m.mcpSession.CallTool(m.ctx, &mcp.CallToolParams{
-				Name:      tc.FunctionCall.Name,
-				Arguments: args,
-			})
-
-			var resultText string
-			switch {
-			case err != nil:
-				slog.Error("Tool call error", "name", tc.FunctionCall.Name, "error", err)
-				resultText = fmt.Sprintf("error calling tool: %v", err)
-			case toolResp.IsError:
-				resultText = extractToolContent(toolResp)
-				if strings.TrimSpace(resultText) == "" {
-					resultText = "tool returned an error"
-				}
-				slog.Warn("Tool returned error status",
-					"name", tc.FunctionCall.Name,
-					"error_preview", util.TruncateForLog(resultText, 500),
-				)
-			default:
-				resultText = extractToolContent(toolResp)
-				slog.Debug("Tool execution successful",
-					"name", tc.FunctionCall.Name,
-					"result_len", len(resultText),
-					"result_preview", util.TruncateForLog(resultText, 500),
-				)
-			}
-
-			toolResultParts = append(toolResultParts, llms.ToolCallResponse{
-				ToolCallID: tc.ID,
-				Name:       tc.FunctionCall.Name,
-				Content:    resultText,
-			})
+	case agent.EventToolEnd:
+		id := m.endToolPanelID(ev.Tool)
+		m.upsertToolPanelItem(id, ev.Tool)
+		m.toolCalls++
+		if ev.Tool.IsCached {
+			m.cacheHits++
+		} else {
+			m.cacheMisses++
 		}
-		return toolsResultMsg{toolResultParts}
+		if ev.Tool.IsStored {
+			m.cacheStores++
+		}
+		if ev.Tool.IsError {
+			m.toolErrors++
+		}
+		m.refreshViewport(false)
+
+	case agent.EventAssistant:
+		rendered, err := m.renderer.Render(normalizeMarkdownForTerminal(ev.Text))
+		if err != nil {
+			rendered = ev.Text
+		}
+		m.messages = append(m.messages, fmt.Sprintf("%s\n%s", assistantStyle.Render("Assistant:"), rendered))
+		m.appendConversation("assistant", ev.Text)
+		m.refreshViewport(false)
 	}
 }
 
@@ -811,6 +1105,53 @@ func (m modelSelector) View() string {
 	return "\n" + m.list.View()
 }
 
+func configureSelectorList(items []list.Item, title string, width, height int) list.Model {
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.
+		Foreground(lipgloss.Color("#A8A8A8"))
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.
+		Foreground(lipgloss.Color("#6D7E97"))
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
+		Bold(true).
+		Foreground(lipgloss.Color("#00D7D7")).
+		BorderForeground(lipgloss.Color("#005FB8"))
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
+		Foreground(lipgloss.Color("#8FB7D8")).
+		BorderForeground(lipgloss.Color("#005FB8"))
+	delegate.Styles.DimmedTitle = delegate.Styles.DimmedTitle.
+		Foreground(lipgloss.Color("#6D7E97"))
+	delegate.Styles.DimmedDesc = delegate.Styles.DimmedDesc.
+		Foreground(lipgloss.Color("#5C6A7C"))
+	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.
+		Bold(true).
+		Foreground(lipgloss.Color("#00D7D7"))
+
+	l := list.New(items, delegate, width, height)
+	l.Title = title
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.Styles.Title = titleStyle
+	l.Styles.TitleBar = l.Styles.TitleBar.
+		PaddingLeft(0).
+		PaddingBottom(1)
+	l.Styles.PaginationStyle = l.Styles.PaginationStyle.
+		Foreground(lipgloss.Color("#6D7E97"))
+	l.Styles.HelpStyle = l.Styles.HelpStyle.
+		Foreground(lipgloss.Color("#6D7E97"))
+	l.Styles.ActivePaginationDot = l.Styles.ActivePaginationDot.
+		Foreground(lipgloss.Color("#00D7D7"))
+	l.Styles.InactivePaginationDot = l.Styles.InactivePaginationDot.
+		Foreground(lipgloss.Color("#5C6A7C"))
+	l.Styles.DividerDot = l.Styles.DividerDot.
+		Foreground(lipgloss.Color("#005FB8"))
+	l.Styles.StatusEmpty = l.Styles.StatusEmpty.
+		Foreground(lipgloss.Color("#6D7E97"))
+	l.Styles.NoItems = l.Styles.NoItems.
+		Foreground(lipgloss.Color("#6D7E97"))
+
+	return l
+}
+
 func modelProvider(modelName string) string {
 	switch {
 	case strings.HasPrefix(modelName, "gpt-"), strings.HasPrefix(modelName, "o1-"), strings.HasPrefix(modelName, "o3-"):
@@ -858,7 +1199,6 @@ func main() {
 }
 
 func runSinglePrompt(modelFlag string, prompt string) {
-	// 1. Logging Setup (keep slog for background details)
 	logFile := util.ClientLogFile()
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -870,191 +1210,95 @@ func runSinglePrompt(modelFlag string, prompt string) {
 	slog.SetDefault(logger)
 	defer f.Close()
 
-	// Minimal setup for single prompt
 	ctx := context.Background()
 
-	// Server path
 	serverPath := os.Getenv("ELASTIC_MCP_SERVER")
 	if serverPath == "" {
 		serverPath = "./elastic-mcp-server"
 	}
 
-	// LLM Setup
 	modelName := modelFlag
 	if modelName == "" {
 		modelName = os.Getenv("ELASTIC_MODEL")
 	}
 	if modelName == "" {
-		// Default to gemini-2.0-flash if nothing specified
 		modelName = "gemini-2.0-flash"
 	}
-
-	var llmClient llms.Model
 
 	openaiKey := os.Getenv("OPENAI_API_KEY")
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	geminiKey := os.Getenv("GEMINI_API_KEY")
 
+	var llmModel provider.LanguageModel
 	switch modelProvider(modelName) {
 	case "openai":
 		if openaiKey == "" {
 			fmt.Fprintln(os.Stderr, "OPENAI_API_KEY is required for openai models")
 			os.Exit(1)
 		}
-		llmClient, err = openai.New(openai.WithModel(modelName))
+		llmModel = openai.Chat(modelName)
 	case "anthropic":
 		if anthropicKey == "" {
 			fmt.Fprintln(os.Stderr, "ANTHROPIC_API_KEY is required for anthropic models")
 			os.Exit(1)
 		}
-		llmClient, err = anthropic.New(anthropic.WithModel(modelName))
+		llmModel = anthropic.Chat(modelName)
 	case "gemini":
 		if geminiKey == "" {
 			fmt.Fprintln(os.Stderr, "GEMINI_API_KEY is required for gemini models")
 			os.Exit(1)
 		}
-		llmClient = llm.NewGeminiModel(geminiKey, modelName, nil)
+		llmModel = google.Chat(modelName)
 	default:
 		fmt.Fprintf(os.Stderr, "Unsupported model prefix: %s\n", modelName)
 		os.Exit(1)
 	}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create LLM client: %v\n", err)
-		os.Exit(1)
-	}
-
-	// MCP Setup
-	cmd := exec.Command(serverPath)
-	transport := &mcp.CommandTransport{Command: cmd}
-	client := mcp.NewClient(&mcp.Implementation{Name: "elastic-cli-oneshot", Version: "1.0.0"}, nil)
-
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
+	oneshotTransport := &goaimcp.StdioTransport{Command: serverPath}
+	mcpClient := goaimcp.NewClient("elastic-cli-oneshot", "1.0.0",
+		goaimcp.WithTransport(oneshotTransport),
+	)
+	oneshotTransport.OnClose(func() { mcpClient.Close() })
+	if err := mcpClient.Connect(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect to MCP server: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer stopServer(mcpClient)
 
-	toolsResult, err := session.ListTools(ctx, nil)
+	toolsResult, err := mcpClient.ListTools(ctx, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to list tools: %v\n", err)
+		stopServer(mcpClient)
 		os.Exit(1)
 	}
 
-	lcTools := make([]llms.Tool, 0, len(toolsResult.Tools))
+	tools := make([]goai.Tool, 0, len(toolsResult.Tools))
 	toolNames := make([]string, 0, len(toolsResult.Tools))
 	for _, t := range toolsResult.Tools {
 		toolNames = append(toolNames, t.Name)
-		lcTools = append(lcTools, llms.Tool{
-			Type: "function",
-			Function: &llms.FunctionDefinition{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  normalizeToolSchema(t.InputSchema),
-			},
+		tools = append(tools, goai.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
 		})
 	}
-	slog.Info("Discovered tools", "count", len(lcTools), "names", toolNames)
+	slog.Info("Discovered tools", "count", len(tools), "names", toolNames)
 
-	history := []llms.MessageContent{
-		{
-			Role:  llms.ChatMessageTypeSystem,
-			Parts: []llms.ContentPart{llms.TextContent{Text: systemPrompt}},
-		},
-		{
-			Role:  llms.ChatMessageTypeHuman,
-			Parts: []llms.ContentPart{llms.TextContent{Text: prompt}},
-		},
-	}
+	history := []provider.Message{goai.UserMessage(prompt)}
 
-	for {
-		resp, err := util.WithRetry(ctx, func() (*llms.ContentResponse, error) {
-			return llmClient.GenerateContent(ctx, history, llms.WithTools(lcTools))
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Generation error: %v\n", err)
-			os.Exit(1)
+	eng := agent.New(mcpClient, llmModel, tools, modelName)
+	result := eng.Turn(ctx, history, func(ev agent.Event) {
+		switch ev.Kind {
+		case agent.EventToolStart:
+			fmt.Printf("Calling tool: %s\n", ev.Tool.Call.Name)
+		case agent.EventAssistant:
+			fmt.Println(ev.Text)
 		}
-		if resp == nil || len(resp.Choices) == 0 {
-			fmt.Fprintln(os.Stderr, "Generation error: LLM returned no choices")
-			os.Exit(1)
-		}
-
-		choice := resp.Choices[0]
-		assistantParts := []llms.ContentPart{}
-		if choice.Content != "" {
-			assistantParts = append(assistantParts, llms.TextContent{Text: choice.Content})
-			fmt.Println(choice.Content)
-		}
-
-		if len(choice.ToolCalls) == 0 {
-			break
-		}
-
-		for i := range choice.ToolCalls {
-			if choice.ToolCalls[i].ID == "" {
-				b := make([]byte, 8)
-				if _, err := rand.Read(b); err != nil {
-					fmt.Fprintf(os.Stderr, "Generation error: failed to create tool call ID: %v\n", err)
-					os.Exit(1)
-				}
-				choice.ToolCalls[i].ID = hex.EncodeToString(b)
-			}
-			assistantParts = append(assistantParts, choice.ToolCalls[i])
-			fmt.Printf("Calling tool: %s\n", toolCallName(choice.ToolCalls[i]))
-		}
-
-		history = append(history, llms.MessageContent{
-			Role:  llms.ChatMessageTypeAI,
-			Parts: assistantParts,
-		})
-
-		toolResults := []llms.ContentPart{}
-		for _, tc := range choice.ToolCalls {
-			if tc.FunctionCall == nil || tc.FunctionCall.Name == "" {
-				toolResults = append(toolResults, llms.ToolCallResponse{
-					ToolCallID: tc.ID,
-					Name:       toolCallName(tc),
-					Content:    "invalid tool call: missing function name",
-				})
-				continue
-			}
-
-			var args map[string]any
-			if err := json.Unmarshal([]byte(toolCallArguments(tc)), &args); err != nil {
-				toolResults = append(toolResults, llms.ToolCallResponse{
-					ToolCallID: tc.ID,
-					Name:       tc.FunctionCall.Name,
-					Content:    fmt.Sprintf("invalid tool arguments: %v", err),
-				})
-				continue
-			}
-
-			toolResp, err := session.CallTool(ctx, &mcp.CallToolParams{
-				Name:      tc.FunctionCall.Name,
-				Arguments: args,
-			})
-
-			resultText := ""
-			if err != nil {
-				resultText = fmt.Sprintf("error: %v", err)
-			} else {
-				resultText = extractToolContent(toolResp)
-			}
-			toolResults = append(toolResults, llms.ToolCallResponse{
-				ToolCallID: tc.ID,
-				Name:       tc.FunctionCall.Name,
-				Content:    resultText,
-			})
-		}
-
-		for _, res := range toolResults {
-			history = append(history, llms.MessageContent{
-				Role:  llms.ChatMessageTypeTool,
-				Parts: []llms.ContentPart{res},
-			})
-		}
+	})
+	if result.Err != nil {
+		fmt.Fprintf(os.Stderr, "Generation error: %v\n", result.Err)
+		stopServer(mcpClient)
+		os.Exit(1)
 	}
 }
 
@@ -1062,21 +1306,22 @@ func runWebUI(modelFlag string, memoryFlag bool, port int) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	session, llmClient, lcTools, modelName, err := setupApp(ctx, modelFlag)
+	mcpClient, llmModel, tools, modelName, err := setupApp(ctx, modelFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer stopServer(mcpClient)
 
 	fmt.Printf("Web UI starting at http://localhost:%d\n", port)
-	if err := webui.RunServer(ctx, session, llmClient, lcTools, modelName, port, memoryFlag); err != nil {
+	if err := webui.RunServer(ctx, mcpClient, llmModel, tools, modelName, port, memoryFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Web UI error: %v\n", err)
+		stopServer(mcpClient)
 		os.Exit(1)
 	}
 }
 
-func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.Model, []llms.Tool, string, error) {
+func setupApp(ctx context.Context, modelFlag string) (*goaimcp.Client, provider.LanguageModel, []goai.Tool, string, error) {
 	// 1. Logging Setup (keep slog for background details)
 	logFile := util.ClientLogFile()
 
@@ -1096,7 +1341,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 
 	// LLM Setup
 	var modelName string
-	var llmClient llms.Model
+	var llmModel provider.LanguageModel
 
 	elasticModel := modelFlag
 	if elasticModel == "" {
@@ -1127,11 +1372,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 		// Only ask for provider if more than one is available
 		selectedProvider := ""
 		if len(providerItems) > 1 {
-			l := list.New(providerItems, list.NewDefaultDelegate(), 40, 10)
-			l.Title = "Select Provider"
-			l.SetShowStatusBar(false)
-			l.SetFilteringEnabled(false)
-			l.Styles.Title = titleStyle
+			l := configureSelectorList(providerItems, "Select Provider", 40, 10)
 
 			m := modelSelector{list: l}
 			p := tea.NewProgram(m)
@@ -1153,16 +1394,16 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 		switch selectedProvider {
 		case "OpenAI":
 			modelItems = []list.Item{
-				item{title: "gpt-5", desc: ""},
-				item{title: "gpt-5-mini", desc: ""},
-				item{title: "gpt-5-nano", desc: ""},
+				item{title: "gpt-5", desc: "Most advanced OpenAI model"},
+				item{title: "gpt-5-mini", desc: "Efficient OpenAI model"},
+				item{title: "gpt-5-nano", desc: "Lightweight OpenAI model"},
 				item{title: "Custom...", desc: ""},
 			}
 		case "Anthropic":
 			modelItems = []list.Item{
-				item{title: "claude-sonnet-4-6", desc: ""},
-				item{title: "claude-haiku-4-5", desc: ""},
-				item{title: "claude-opus-4-6", desc: ""},
+				item{title: "claude-opus-4-6", desc: "Most capable Claude model"},
+				item{title: "claude-sonnet-4-6", desc: "Balanced performance and speed"},
+				item{title: "claude-haiku-4-5", desc: "Fastest Claude model"},
 				item{title: "Custom...", desc: ""},
 			}
 		case "Gemini":
@@ -1173,11 +1414,7 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 			}
 		}
 
-		l := list.New(modelItems, list.NewDefaultDelegate(), 40, 12)
-		l.Title = fmt.Sprintf("Select %s Model", selectedProvider)
-		l.SetShowStatusBar(false)
-		l.SetFilteringEnabled(false)
-		l.Styles.Title = titleStyle
+		l := configureSelectorList(modelItems, fmt.Sprintf("Select %s Model", selectedProvider), 40, 12)
 
 		m := modelSelector{list: l}
 		p := tea.NewProgram(m)
@@ -1210,74 +1447,69 @@ func setupApp(ctx context.Context, modelFlag string) (*mcp.ClientSession, llms.M
 		if openaiKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("OPENAI_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = openai.New(openai.WithModel(modelName))
+		llmModel = openai.Chat(modelName)
 	case "anthropic":
 		if anthropicKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("ANTHROPIC_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient, err = anthropic.New(anthropic.WithModel(modelName))
+		llmModel = anthropic.Chat(modelName)
 	case "gemini":
 		if geminiKey == "" {
 			return nil, nil, nil, "", fmt.Errorf("GEMINI_API_KEY is required for the selected model %s", modelName)
 		}
-		llmClient = llm.NewGeminiModel(geminiKey, modelName, nil)
+		llmModel = google.Chat(modelName)
 	default:
 		return nil, nil, nil, "", fmt.Errorf("unsupported model prefix: %s", modelName)
 	}
 
-	if err != nil {
-		return nil, nil, nil, "", fmt.Errorf("failed to create LLM client: %w", err)
-	}
-
-	// MCP Setup
-	cmd := exec.Command(serverPath)
-	transport := &mcp.CommandTransport{Command: cmd}
-	client := mcp.NewClient(&mcp.Implementation{Name: "elastic-cli", Version: "1.0.0"}, nil)
-
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
+	// MCP Setup — register OnClose before Connect so the client cancels pending
+	// requests immediately when the server subprocess exits unexpectedly.
+	transport := &goaimcp.StdioTransport{Command: serverPath}
+	mcpClient := goaimcp.NewClient("elastic-cli", "1.0.0",
+		goaimcp.WithTransport(transport),
+	)
+	transport.OnClose(func() { mcpClient.Close() })
+	if err := mcpClient.Connect(ctx); err != nil {
 		return nil, nil, nil, "", fmt.Errorf("failed to connect to MCP server at %s: %w", serverPath, err)
 	}
 
-	toolsResult, err := session.ListTools(ctx, nil)
+	toolsResult, err := mcpClient.ListTools(ctx, nil)
 	if err != nil {
-		session.Close()
+		mcpClient.Close()
 		return nil, nil, nil, "", fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	lcTools := make([]llms.Tool, 0, len(toolsResult.Tools))
+	tools := make([]goai.Tool, 0, len(toolsResult.Tools))
 	toolNames := make([]string, 0, len(toolsResult.Tools))
 	for _, t := range toolsResult.Tools {
 		toolNames = append(toolNames, t.Name)
-		lcTools = append(lcTools, llms.Tool{
-			Type: "function",
-			Function: &llms.FunctionDefinition{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  normalizeToolSchema(t.InputSchema),
-			},
+		tools = append(tools, goai.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
 		})
 	}
-	slog.Info("Discovered tools", "count", len(lcTools), "names", toolNames)
+	slog.Info("Discovered tools", "count", len(tools), "names", toolNames)
 
-	return session, llmClient, lcTools, modelName, nil
+	return mcpClient, llmModel, tools, modelName, nil
 }
 
 func runApp(modelFlag string, memoryFlag bool) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	session, llmClient, lcTools, modelName, err := setupApp(ctx, modelFlag)
+	mcpClient, llmModel, tools, modelName, err := setupApp(ctx, modelFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer stopServer(mcpClient)
 
 	// Run Bubble Tea
-	p := tea.NewProgram(initialModel(ctx, session, llmClient, lcTools, modelName, memoryFlag), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(ctx, mcpClient, llmModel, tools, modelName, memoryFlag), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
+		stopServer(mcpClient)
 		os.Exit(1)
 	}
 }
@@ -1313,19 +1545,4 @@ func saveHistory(input string) {
 	if _, err := f.WriteString(input + "\n"); err != nil {
 		slog.Warn("failed to write to history file", "file", histFile, "error", err)
 	}
-}
-
-// normalizeToolSchema ensures "type":"object" schemas always include a "properties" key.
-// Gemini rejects tool schemas that have additionalProperties:false but no properties map.
-func normalizeToolSchema(schema any) any {
-	m, ok := schema.(map[string]any)
-	if !ok {
-		return schema
-	}
-	if t, _ := m["type"].(string); t == "object" {
-		if _, hasProps := m["properties"]; !hasProps {
-			m["properties"] = map[string]any{}
-		}
-	}
-	return m
 }

@@ -6,14 +6,41 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v9/esapi"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/mfranz/elastic-security-mcp/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// jsonStringSchema is used for arguments typed `any` that accept a JSON-encoded string
+// (the handler also tolerates a raw JSON object via util.StringifyJSON, but the
+// declared schema must commit to "string": Go's `any` otherwise infers to an
+// unconstrained schema with no "type" key, which OpenAI's structured tool-calling
+// rejects ("schema must have a 'type' key"); declaring "object" instead runs into a
+// second OpenAI strict-mode requirement that object schemas set
+// "additionalProperties": false, which would forbid arbitrary query DSL shapes.
+var jsonStringSchema = &jsonschema.Schema{Type: "string"}
+
+// searchArgsSchema is the explicit input schema for SearchArgs, overriding the
+// inferred schema for the Query field (see jsonStringSchema).
+var searchArgsSchema = mustSchemaFor[SearchArgs]()
+
+func mustSchemaFor[T any]() *jsonschema.Schema {
+	s, err := jsonschema.For[T](&jsonschema.ForOptions{
+		TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+			reflect.TypeFor[any](): jsonStringSchema,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
 
 // Tool Arguments
 type ListIndicesArgs struct {
@@ -22,7 +49,7 @@ type ListIndicesArgs struct {
 
 type SearchArgs struct {
 	Index string `json:"index" jsonschema:"The index pattern to search (e.g. logs-* or .alerts-security.alerts-default)"`
-	Query any    `json:"query" jsonschema:"The Elasticsearch JSON query DSL string or object"`
+	Query any    `json:"query" jsonschema:"The Elasticsearch JSON query DSL, encoded as a JSON string (e.g. \"{\\\"query\\\":{\\\"match_all\\\":{}}}\")"`
 }
 
 type ClusterHealthArgs struct {
@@ -379,7 +406,8 @@ func RegisterTools(server *mcp.Server, es *Client) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_elastic",
-		Description: "Search Elasticsearch with a JSON query string or object. Important: 1. Fields containing colons (like MAC addresses) must be quoted in query_string queries (e.g., mac:\"00:11:22*\"). 2. IP fields do not support wildcards; use CIDR notation (e.g., '192.168.1.0/24') or range queries. 3. Prefer search_security_events for common filters as it handles these edge cases automatically. 4. Scope the index parameter as narrowly as possible (e.g. logs-zeek.dns-*, logs-endpoint.events.process-*); avoid a bare '*', which scatter-gathers the query across every index in the cluster and is typically 5-20x slower — use list_indices first if you're unsure of the right pattern.",
+		Description: "Search Elasticsearch with a JSON query DSL encoded as a string. Important: 1. Fields containing colons (like MAC addresses) must be quoted in query_string queries (e.g., mac:\"00:11:22*\"). 2. IP fields do not support wildcards; use CIDR notation (e.g., '192.168.1.0/24') or range queries. 3. Prefer search_security_events for common filters as it handles these edge cases automatically. 4. Scope the index parameter as narrowly as possible (e.g. logs-zeek.dns-*, logs-endpoint.events.process-*); avoid a bare '*', which scatter-gathers the query across every index in the cluster and is typically 5-20x slower — use list_indices first if you're unsure of the right pattern.",
+		InputSchema: searchArgsSchema,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_elastic", &err)
 		args = normalizeSearchArgs(args)

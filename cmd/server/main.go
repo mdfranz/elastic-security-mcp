@@ -17,37 +17,46 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	// Ensure we terminate if the parent process exits (Linux only)
+	setParentDeathSignal()
+
 	// 1. Locking Setup
 	lockFile := util.ServerLockFile()
 
 	lf, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open lock file %s: %v\n", lockFile, err)
-		os.Exit(1)
+		return fmt.Errorf("failed to open lock file %s: %w", lockFile, err)
 	}
-	defer lf.Close()
 
 	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		// Read PID if possible to give a better error message
+		lf.Close()
 		pidData, _ := os.ReadFile(lockFile)
 		pidStr := strings.TrimSpace(string(pidData))
 		if pidStr != "" {
 			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-				// Check if process is still running (cross-platform safe enough for Linux/macOS)
 				if proc, err := os.FindProcess(pid); err == nil {
 					if err := proc.Signal(syscall.Signal(0)); err == nil {
-						fmt.Fprintf(os.Stderr, "Error: another instance of elastic-mcp-server (PID %d) is already running.\n", pid)
-						os.Exit(1)
+						return fmt.Errorf("elastic-mcp-server (PID %d) is already running", pid)
 					}
 				}
 			}
 		}
-		fmt.Fprintf(os.Stderr, "Error: another instance of elastic-mcp-server is already running (lock held on %s).\n", lockFile)
-		os.Exit(1)
+		return fmt.Errorf("elastic-mcp-server is already running (lock on %s)", lockFile)
 	}
 
-	// We have the lock; ensure we cleanup on exit
-	defer os.Remove(lockFile)
+	// We have the lock; ensure we close the file descriptor (which releases flock)
+	// and delete the lockfile when run() exits.
+	defer func() {
+		lf.Close()
+		_ = os.Remove(lockFile)
+	}()
 
 	// Write PID to lock file
 	lf.Truncate(0)
@@ -60,8 +69,7 @@ func main() {
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
-		os.Exit(1)
+		return fmt.Errorf("failed to open log file %s: %w", logFile, err)
 	}
 	defer f.Close()
 
@@ -84,14 +92,14 @@ func main() {
 
 	if elasticURL == "" || elasticKey == "" {
 		slog.Error("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
-		os.Exit(1)
+		return fmt.Errorf("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
 	}
 
 	// 2. Initialize Elasticsearch Client
 	es, err := elasticsearch.NewClient(elasticURL, elasticKey)
 	if err != nil {
 		slog.Error("Error creating the elasticsearch client", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("error creating the elasticsearch client: %w", err)
 	}
 
 	// Skip connectivity check in this version for simplicity,
@@ -121,7 +129,7 @@ func main() {
 		kb, err := kibana.NewClient(kibanaURL, kibanaUser, kibanaPass, kibanaKey)
 		if err != nil {
 			slog.Error("Error creating the kibana client", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("error creating the kibana client: %w", err)
 		}
 		kibana.RegisterTools(server, kb)
 		slog.Info("Kibana tools registered", "url", kibanaURL)
@@ -130,12 +138,14 @@ func main() {
 	}
 
 	// 5. Run Server over Stdio
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
 	defer stop()
 
 	slog.Info("Server listening on stdio")
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 		slog.Error("server run error", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("server run error: %w", err)
 	}
+
+	return nil
 }

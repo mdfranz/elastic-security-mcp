@@ -89,7 +89,7 @@ This project leverages several powerful libraries:
 - [**Redis Go Client**](https://github.com/redis/go-redis): Type-safe Redis client for Go.
 - [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
 - [**Lip Gloss**](https://github.com/charmbracelet/lipgloss): Style and layout primitives for the terminal.
-- [**LangChainGo**](https://github.com/tmc/langchaingo): A framework for building LLM-powered applications in Go.
+- [**any-llm-go**](https://github.com/mozilla-ai/any-llm-go): A Go library for integrating with multiple LLM providers (OpenAI, Anthropic, Gemini) with a unified interface.
 - [**Cobra**](https://github.com/spf13/cobra): A library for creating powerful modern CLI applications.
 - [**Glamour**](https://github.com/charmbracelet/glamour): Markdown rendering for the terminal.
 
@@ -222,6 +222,32 @@ For example, to configure the server in **Claude Desktop**, edit `~/.config/Clau
   }
 }
 ```
+
+### Python Test Client (pydantic-ai)
+
+A standalone Python test client is available in `tools/pydantic_ai_test_mcp.py`. It launches `elastic-mcp-server` as an MCP subprocess via [pydantic-ai](https://ai.pydantic.dev/), then runs it through three fixed investigation tasks (cluster/index discovery, IP enrichment, and alert-to-process pivoting) while tracking token usage per task.
+
+It's managed with [`uv`](https://docs.astral.sh/uv/) and has no dependency on the Go toolchain beyond the built `elastic-mcp-server` binary.
+
+```bash
+make build   # produces ./elastic-mcp-server, which the test client launches
+
+export ELASTIC_URL="your_url"
+export ELASTIC_KEY="your_api_key"
+export KIBANA_URL="your_kibana_url"       # optional, enables Kibana tool tasks
+export ANTHROPIC_API_KEY="your_key"       # or OPENAI_API_KEY / GOOGLE_API_KEY
+
+uv run tools/pydantic_ai_test_mcp.py
+```
+
+Pass a model ID as the first argument to use a different provider or model (defaults to `claude-haiku-4-5`):
+
+```bash
+uv run tools/pydantic_ai_test_mcp.py gemini-2.5-flash
+uv run tools/pydantic_ai_test_mcp.py gpt-5
+```
+
+Logs (including per-task token totals) are written to `pydantic_ai_test.log` and echoed to the console.
 
 ## Troubleshooting
 

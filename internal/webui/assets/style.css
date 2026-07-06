@@ -144,7 +144,7 @@ body::before {
 #workspace {
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 460px);
+    grid-template-columns: minmax(0, 1fr) clamp(360px, 32vw, 520px);
     gap: 18px;
 }
 
