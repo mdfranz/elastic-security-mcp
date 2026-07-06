@@ -27,7 +27,7 @@ graph TD
     subgraph Phase 3: Minimal & Block-Based [pi-llm-go]
         P_Model[llm.LLM]
         P_Loop[Manual Tool Loop]
-        P_Block[Message Content as []llm.Block]
+        P_Block["Message Content as []llm.Block"]
         P_Mem[Custom Memory Adapter]
     end
 
@@ -35,7 +35,7 @@ graph TD
         G_Model[provider.LanguageModel]
         G_Loop[Automatic Tool Loop\nGenerateText + MaxSteps]
         G_MCP[goaimcp.ConvertTools\nAuto-wires Execute Closure]
-        G_Mem[Deleted Memory Package\nDirect []provider.Message Slice]
+        G_Mem["Deleted Memory Package\nDirect []provider.Message Slice"]
     end
 
     L_Model --> A_Model
