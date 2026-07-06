@@ -69,19 +69,6 @@ graph TD
 
 ---
 
-## Corrections to Earlier Claims
-
-| Earlier wording | Problem | More accurate statement |
-| :--- | :--- | :--- |
-| `goai` made tool execution "automated internally" in the current app. | `goai` supports this, but the current repo builds schema-only `goai.Tool` values and executes `provider.ToolCall`s in `internal/agent.Engine.callTool`. | Current `goai` usage standardizes provider messages and tool-call shapes, while `internal/agent` owns execution, event emission, cache-marker normalization, and MCP calls. |
-| `goaimcp.ConvertTools` deleted all dispatcher logic. | The branch plan recommended `ConvertTools`, but the merged code manually constructs `goai.Tool{Name, Description, InputSchema}` and calls `MCPClient.CallTool` itself. | The dispatcher moved out of the front ends and into `internal/agent`; it was not fully replaced by executable `goai.Tool` closures. |
-| Migration reduced dependency weight and binary size. | The repo has no measured binary-size or build-time data in this document. `go.mod` require-line counts went from 62 before `any-llm-go`, to 87 after `any-llm-go`, then back to about 60 after `pi-llm-go`/`goai`. | Treat dependency impact as mixed: `any-llm-go` removed custom app code but added official provider SDK transitive dependencies; `pi-llm-go` and `goai` returned the manifest closer to the earlier size. |
-| `langchaingo` was the sole reason custom Gemini thought-signature code existed. | The local evidence proves the custom file existed and was deleted in the `any-llm-go` migration, but it does not prove that `langchaingo` could not have supported the feature by another path. | The migration removed a repo-local 567-line Gemini wrapper by delegating provider-specific response handling to a provider library. |
-| All block-based libraries preserved Gemini thought signatures. | `pi-llm-go` improved content shape, but local branch history contains no `thoughtSignature` handling. Its port notes list reasoning trace visibility as an opportunity, not landed behavior. | Among the evaluated replacement libraries, `any-llm-go` and `goai` are the supported choices for Gemini thought-signature preservation. The original `langchaingo` phase supported it only through custom app code. |
-| `goai` is "zero-overhead". | The current implementation still has orchestration code: `internal/agent/agent.go` was added with 367 LoC in `c7ab787`. | The final shape centralizes orchestration rather than eliminating it. |
-
----
-
 ## Evidence From Repo History
 
 | Commit / branch | Evidence |
@@ -105,6 +92,48 @@ Manifest-size proxy from `go.mod`/`go.sum` history:
 These counts are a lightweight proxy, not proof of binary size, compile time, or
 security exposure. Any claim about those outcomes should be backed by measured
 binary artifacts, `go test -json`/build timings, or a dependency scanner report.
+
+Upstream maintenance recency was also part of the selection pressure. Current
+`main` heads were checked on July 6, 2026:
+
+| Upstream project | Latest `main` commit checked | Commit | Signal |
+| :--- | :--- | :--- | :--- |
+| `github.com/tmc/langchaingo` | January 11, 2026 | [`8fea3de`](https://github.com/tmc/langchaingo/commit/8fea3de63675b901cf7a2cdc435c204cb7a93643) `llms/openai: add web search tool support` | Mature and popular, but the least recent upstream activity among the evaluated projects. |
+| `github.com/mozilla-ai/any-llm-go` | May 11, 2026 | [`56c9a54`](https://github.com/mozilla-ai/any-llm-go/commit/56c9a5486f3da2065b77c211e12b964444d94b58) `build(deps)!: bump ollama 0.23.0 -> 0.23.2 and Go minimum to 1.26 (#102)` | Active enough to track provider SDK/dependency changes, including the earlier Gemini thought-signature work. |
+| `github.com/amit-timalsina/pi-llm-go` | June 30, 2026 | [`ef3cddd`](https://github.com/amit-timalsina/pi-llm-go/commit/ef3cddd390441ffcc9425a5817d22b68f5580fa1) `ci: Bump actions/cache from 5 to 6 (#38)` | Recent activity, but recency did not offset the missing verified Gemini thought-signature preservation for this project. |
+| `github.com/zendev-sh/goai` | June 21, 2026 | [`a0ff039`](https://github.com/zendev-sh/goai/commit/a0ff039ca03ba71159ab7569de53382bd302c056) `docs: update README and roadmap for v0.8.5` | Recent activity plus explicit Google-provider `thoughtSignature` handling made it the best fit for the final integration. |
+
+The `goai` ecosystem also includes [ZenFlow](https://zenflow.sh/), a
+multi-agent orchestration harness built around declarative YAML workflows,
+hub-and-spoke agent messaging, MCP tools, and the providers `goai` supports.
+That made `goai` more attractive than a standalone provider wrapper because it
+kept a path open for future multi-agent workflows without changing the provider
+foundation again.
+
+---
+
+## Evidence-Backed Conclusions
+
+The migration history supports these conclusions:
+
+1. **Provider-feature support, upstream recency, and ecosystem direction drove
+   the final direction.** `any-llm-go` removed the custom Gemini wrapper by
+   delegating Gemini handling to provider SDK code, while `goai` added explicit
+   Google-provider handling for `thoughtSignature` metadata, had recent upstream
+   activity, and connected to the ZenFlow multi-agent orchestration ecosystem.
+   The `pi-llm-go` branch improved message shape but was not completed once
+   `any-llm-go` and `goai` were clearly stronger on provider features.
+2. **The clearest code-footprint win was app-owned code deletion and
+   consolidation.** The repo deleted the 567-line custom Gemini client, deleted
+   the later 73-line memory adapter, and moved duplicated front-end tool loops
+   into `internal/agent`.
+3. **The current `goai` integration centralizes orchestration; it does not use
+   `goai`'s automatic executable-tool loop.** Current tools are schema-only, and
+   `internal/agent.Engine.Turn` executes returned `provider.ToolCall`s through
+   `goaimcp.Client.CallTool`.
+4. **Dependency-size conclusions should stay qualified.** The manifest shrank
+   after the `any-llm-go` phase, but this document does not include measured
+   binary size, build time, or vulnerability-surface data.
 
 ---
 
@@ -134,7 +163,7 @@ thought signatures:
 | Implementation | Support level | Evidence |
 | :--- | :--- | :--- |
 | `langchaingo` phase | App-level workaround | `internal/llm/gemini_model.go` stored and reattached `thoughtSignature` values manually; this was custom repo code, not a generic `langchaingo` feature. |
-| `any-llm-go` phase | Library/provider-wrapper support | The migration deleted the custom Gemini file, moved provider handling behind `any-llm-go`, and pulled in `google.golang.org/genai`; the library docs advertise Gemini reasoning support and official-provider SDK delegation. |
+| `any-llm-go` phase | Library/provider-wrapper support | The migration deleted the custom Gemini file, moved provider handling behind `any-llm-go`, and pulled in `google.golang.org/genai`; upstream also landed [`d0b531f`](https://github.com/mozilla-ai/any-llm-go/commit/d0b531f) for Gemini `ThoughtSignature` capture and replay. |
 | `pi-llm-go` phase | Partial/evaluation port; not selected | The branch was not finished after provider-feature support made `any-llm-go` and `goai` the stronger choices. It has no `thoughtSignature` hits. Its notes mention extracting `llm.ThinkingBlock` parts as a future UI opportunity, which is weaker than preserving Gemini signatures across tool turns. |
 | `goai` phase | Library/provider-wrapper support | `goai` v0.8.5's Google provider preserves `thoughtSignature` in provider metadata and has tests for streaming reasoning, tool calls with thought signatures, and message conversion with signatures. |
 
@@ -187,6 +216,12 @@ That shared loop lives in `internal/agent` and is now used by the TUI, Web UI,
 and one-shot CLI path. This is still a real simplification because it removed
 duplicated loop implementations from the front ends, but it is not the same as
 outsourcing tool execution entirely to `goai`.
+
+The `goai` choice also aligned with [ZenFlow](https://zenflow.sh/), which uses
+`goai` as the provider layer for multi-agent YAML workflows, MCP-enabled agents,
+and embeddable Go orchestration. That ecosystem fit mattered because
+`elastic-security-mcp` was already moving from duplicated UI loops toward a
+central agent engine.
 
 ---
 
