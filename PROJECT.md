@@ -6,7 +6,7 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
-## Phase 1: Foundation & MCP Infrastructure (Commits 30bb772 → 374666f)
+## Phase 1: Foundation & MCP Infrastructure (April 30, 2026; Commits 30bb772 → 374666f)
 
 **Theme:** MCP server runtime and Elasticsearch integration
 
@@ -23,7 +23,7 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
-## Phase 2: CLI & Multi-Provider LLM Support (Commits 28a8b01 → 22e1a3a)
+## Phase 2: CLI & Multi-Provider LLM Support (April 30, 2026; Commits 28a8b01 → 22e1a3a)
 
 **Theme:** Interactive TUI development and provider abstraction
 
@@ -40,7 +40,7 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
-## Phase 3: Security-Focused Search & Caching (Commits 6e8917a → 5243e30)
+## Phase 3: Security-Focused Search & Caching (April 30-May 2, 2026; Commits 6e8917a → 5243e30)
 
 **Theme:** Domain-specific search tools and indicator indexing
 
@@ -57,7 +57,7 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
-## Phase 4: Performance & Context Optimization (Commits ad3ecd6 → 64fd61c)
+## Phase 4: Performance & Context Optimization (May 1-May 2, 2026; Commits ad3ecd6 → 64fd61c)
 
 **Theme:** Resource management and stability
 
@@ -73,7 +73,7 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
-## Phase 5: Web UI, Observability & Robustness (Commits 6141e72 → bf20343)
+## Phase 5: Web UI, Observability & Robustness (May 2, 2026; Commits 6141e72 → bf20343)
 
 **Theme:** Advanced interfaces and production readiness
 
@@ -94,11 +94,15 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ---
 
-## Phase 6: Engine Unification, Observability & Test Coverage (Commits 56473c1 → 415cabd)
+## Phase 6: Provider Migration, Engine Unification, Observability & Test Coverage (June 25-July 5, 2026; Commits a59d51e → 415cabd)
 
-**Theme:** Shared logic consolidation, test automation, and runtime observability
+**Theme:** LLM provider migration, shared logic consolidation, test automation, and runtime observability
 
 ### Key Accomplishments
+- **Provider Migration Path**: Moved the LLM integration away from LangChainGo through a sequence of experimental branches:
+  - `any-llm-go` (June 25, 2026): Ported the integration layer from LangChainGo to Any-LLM-Go, added `ANYLLM-LANGCHAIN-GO.md`, updated entity-lookup prompt guidance, replaced LangChainGo references in docs, and resolved merge conflicts against `main` (`a59d51e` → `c1622fc`).
+  - `pi-llm-port` (June 26, 2026): Ported the integration from Any-LLM-Go to `pi-llm-go` (`6078c18`).
+  - `zendev-goai` (June 26, 2026): Ported the integration from `pi-llm-go` to the `goai` provider framework (`a712d25`).
 - **Engine Unification**: Centralized the LLM tool-calling and sequential tool execution loop from duplicated implementations in the CLI TUI (`cmd/cli/main.go`) and Web UI (`internal/webui/server.go`) into a unified, reusable `internal/agent.Engine` package.
 - **LLM Observability Hooks**: Implemented the `internal/llmobs` package to register lifecycle hooks for logging LLM requests, latency, token usage, and error statuses via standard structured logging (`slog`).
 - **Comprehensive Unit Testing**: Formulated a structured testing plan in `docs/TEST-COVERAGE-PLAN.md` and implemented robust unit tests (Phases 1, 2, 3, 5, and 6) covering:
@@ -112,52 +116,25 @@ Elastic Security MCP is an implementation of the [Model Context Protocol (MCP)](
 
 ### Technical Decisions
 - **Decoupled Engine Core**: Refactored the core agent loop to emit protocol-neutral UI events (`agent.Event`), allowing frontend clients (WebSocket and Bubble Tea TUI) to serve as pure adapters.
+- **Provider Abstraction Reset**: Treated the Any-LLM-Go and `pi-llm-go` branches as migration waypoints, with `goai` becoming the final provider framework merged through `goai-final-merge`.
 - **Defensive History Sharing**: Implemented defensive deep-copying of the conversation history inside the background agent loop (`Engine.Turn`) to prevent data race conflicts with the TUI update threads.
 - **Isolate Request Building for Tests**: Extracted query construction logic from network-bound handlers into pure functions (e.g. `buildProcessSearchRequest`), enabling table-driven unit tests without running live Elasticsearch instances.
 - **In-Process Redis Fakes**: Chose `miniredis` over mocking interfaces or spinning up live test containers, ensuring fast and deterministic execution of pipeline/TTL logic in local development.
 
 ---
 
-## Architectural Themes
+## Experimental Branch Timeline
 
-### 1. **Client-Server Separation (MCP)**
-- **Server-Side**: Handles data fetching, caching, and normalization. Protocol-compliant and LLM-agnostic.
-- **Client-Side**: Handles orchestration, UI, and history. Connects via stdio.
+The phase summaries above describe the product evolution as it landed on `main`. The repository also used short-lived experimental branches for larger changes. Most branch work was merged into `main`; the only currently unmerged branch work found in local history is called out below.
 
-### 2. **Layered Abstraction**
-- **Raw** (`search_elastic`): Direct Query DSL access.
-- **Typed** (`search_security_events`): ECS-optimized filtering.
-- **Cached** (`lookup_*`): Sub-millisecond entity lookups.
+### Merged Experimental Branches
+- **`codex-first-pass` (April 30-May 1, 2026; merged via PR #1 and PR #2)**: Added the first multi-provider LLM client work, dependency updates, enhanced logging, and stability fixes (`22e1a3a`, `8e97af6`, `ad3ecd6`).
+- **`cache-log-1-may` (May 2, 2026; merged via PR #3)**: Added ECS-focused security search, Redis caching, entity lookup, response truncation, query fixes, tool timeouts, and CIDR escaping (`5243e30` → `5802bd3`).
+- **`webui` (May 2, 2026; merged via PR #4)**: Added the optional Web UI, Markdown export, cache statistics, server locking, embedded assets, WebSocket validation, and related documentation (`80e951e` → `5d3842f`).
+- **`claude-refactor-4-may` (May 2-May 4, 2026; merged into `main`)**: Continued post-Web UI polish, including README conflict cleanup, Podman documentation, tool-call scrolling fixes, server-locking improvements, UI cache error tracking, CLI session export, and screenshot restoration (`7eafc01` → `7a40e5b`).
+- **`kibana-edr` remote branch (June 20, 2026; merged via PR #5)**: Added Kibana REST API tooling, Fleet agent listing, detection alert search, endpoint process search, README configuration updates, detection-rule status fixes, and MCP query parsing/retry/logging refinements (`3a595f7` → `e522cfc`).
+- **`cluster-health` (July 4-July 5, 2026; merged via PR #6 and PR #7)**: Enhanced MCP tool metadata and cache-status reporting, then added `export_security_events` with scroll pagination, size-based export splitting, and pre-PR review fixes (`26ad7d4`, `7911405` → `c9a557e`).
+- **`goai-final-merge` (July 5, 2026; merged via PR #8)**: Brought together the provider migration, unified `internal/agent` engine, graceful lifecycle handling, LLM observability hooks, Go toolchain updates, expanded unit tests, and PROJECT documentation refresh (`56473c1` → `58e2d2c`).
 
-### 3. **Observability & Aesthetics**
-- High-contrast, security-focused UI design in both terminal and browser.
-- Transparent reporting of "where" data comes from (Cache vs. Elastic).
-
----
-
-## Current Capabilities
-
-### Tools
-- **list_indices**: Pattern-based index listing with health/size stats.
-- **search_security_events**: ECS search with CIDR, MAC, and Wildcard support.
-- **search_processes**: Endpoint process event search with process/parent filters.
-- **search_security_alerts**: Query and filter detection alerts from Elastic Security rules.
-- **lookup_domain / lookup_ip**: Redis-backed sub-millisecond passive entity lookup.
-- **search_elastic**: Raw JSON Query DSL search with automatic collapse-recovery retry.
-- **Kibana Tools**: Manage detection rules (`list_detection_rules`, `get_detection_rule`), spaces (`list_kibana_spaces`), agents (`list_agents`), or send arbitrary calls via `kibana_api_request`.
-
-### Configuration
-- `ELASTIC_MODEL`: Default LLM.
-- `CACHE_ENABLED`: Redis toggle.
-- `WEBUI_ENABLED`: Optional browser interface.
-- `MAX_RESPONSE_CHARS`: Truncation limit.
-
----
-
-## Future Work
-- **Phase 4 Testing (Utility Edge Cases)**: Implement unit tests for `internal/util/retry_test.go`, logging utilities, and environment variable configuration overrides.
-- **Stall-Retry Limits**: Introduce a bounded turn/iteration count on the agent engine execution loop to cleanly recover from repetitive LLM stalling.
-- **Token-Aware Pruning**: Moving from message counts to actual token counting.
-- **Multi-Cluster Support**: Federation across multiple Elastic clusters.
-- **Automated Reporting**: Generation of PDF/HTML security reports from session history.
-- **Adaptive TTLs**: Dynamic cache invalidation based on index metadata.
+### Not Merged Into `main`
+- **Local `kibana-edr` branch (June 20, 2026; not merged)**: Contains one local-only documentation cleanup commit after the remote branch was merged: `8b00003` (`docs: pre PR final doc review`). The commit changes `ARCHITECTURE.md` and `README.md` and is not reachable from `main`.
