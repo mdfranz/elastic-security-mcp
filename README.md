@@ -8,59 +8,23 @@ It consists of two main components:
 
 For a detailed look at how these components interact, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Screenshots
+## Key Features
 
-### TUI (Terminal User Interface)
-![Elastic Security TUI](tui.png)
 
-### Web UI (Browser Interface)
-![Elastic Security Web UI](webui.png)
+## Key Libraries
 
-## Components Overview
+This project leverages several powerful libraries:
 
-## Elastic Security Assistant (Web UI)
+- [**Elasticsearch Go Client**](https://github.com/elastic/go-elasticsearch): The official Go client for Elasticsearch (v9).
+- [**Model Context Protocol (MCP) SDK**](https://github.com/modelcontextprotocol/go-sdk): SDK for building MCP servers and clients.
+- [**goai**](https://github.com/zendev-sh/goai): A Go library for integrating with multiple LLM providers (OpenAI, Anthropic, Gemini) with a unified interface and built-in agentic tool-calling loop support.
+- [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
+- [**Lip Gloss**](https://github.com/charmbracelet/lipgloss): Style and layout primitives for the terminal.
+- [**Cobra**](https://github.com/spf13/cobra): A library for creating powerful modern CLI applications.
+- [**Glamour**](https://github.com/charmbracelet/glamour): Markdown rendering for the terminal.
+- [**Redis Go Client**](https://github.com/redis/go-redis): Type-safe Redis client for Go.
 
-If you prefer a browser-based interface that maintains the same "security terminal" aesthetic:
-
-```bash
-./elastic-cli --webui --port 8080
-```
-
-Open `http://localhost:8080` in your browser to start.
-
-The Web UI provides a specialized workspace for security investigations:
-
-- **Interactive Security Console**: A modern, responsive interface designed for deep-dive security analysis.
-- **Dual-Panel Workspace**:
-    - **Investigation Feed**: A real-time conversation stream with the AI analyst. Includes full Markdown support for high-quality reports, data tables, and formatted analysis.
-    - **Execution Trace (Tool Activity)**: A dedicated sidebar that provides visibility into the agent's thought process. Monitor tool calls as they happen, with expandable cards showing input arguments and raw output results.
-- **Real-time Feedback**: Powered by WebSockets to provide immediate updates on tool progress ("Analyzing request", "Running search_security_events", etc.) and streaming responses.
-- **Command History**: Efficiently navigate previous queries using `Up/Down` arrow keys, with history persisted across browser sessions.
-- **Session Management**: Quickly clear context and start fresh investigations with a single click.
-- **Export to Markdown**: Save your entire investigation, including both your queries and the AI's analysis, as a formatted Markdown file for easy documentation or reporting.
-- **Agentic Intelligence**: The same powerful security analyst from the CLI, tuned to prefer structured tools like `search_security_events` for accurate data retrieval.
-
-## Elastic Security Assistant (CLI)
-
-The project includes a powerful, agentic CLI that acts as a security analyst assistant.
-
-- **Interactive TUI**: Built with Bubble Tea and Lip Gloss for a modern terminal experience.
-- **Multi-Provider Support**: Seamlessly switch between OpenAI, Anthropic, and Google Gemini models.
-- **Interactive Model Selection**: Pick your preferred provider and model on startup if not pre-configured.
-- **Conversation Memory**: Built-in context management for long-running investigations (type `/memory` to view).
-- **One-Shot Execution**: Run quick queries and exit using the `--prompt` or `-p` flag.
-- **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
-- **Optional Web UI**: Use the `--webui` flag to start a local web server with a similar look and feel to the terminal experience.
-
-### CLI Flags
-
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--model` | `-m` | `""` | Model ID to use (e.g. `gpt-5`, `claude-sonnet-4-6`). Falls back to `ELASTIC_MODEL` env var or interactive selection. |
-| `--memory` | | `true` | Enable conversation memory across turns. |
-| `--prompt` | `-p` | `""` | Run a single prompt non-interactively and exit. |
-| `--webui` | | `false` | Start the optional browser-based Web UI instead of the TUI. |
-| `--port` | | `8080` | Port for the Web UI server. |
+see [PKG.md](PKG.md) for detailed list.
 
 ## MCP Server Tools
 
@@ -86,20 +50,56 @@ The MCP server provides the following tools to any compatible host:
 - **get_detection_rule**: Get details of a specific detection rule by its internal `id` or user-defined `rule_id`.
 - **list_agents**: Retrieve Elastic Agents from Fleet using the Kibana Fleet API, with optional KQL filtering and pagination.
 
-## Key Libraries
+## Screenshots
 
-This project leverages several powerful libraries:
+### TUI (Terminal User Interface)
+![Elastic Security TUI](tui.png)
 
-- [**Elasticsearch Go Client**](https://github.com/elastic/go-elasticsearch): The official Go client for Elasticsearch (v9).
-- [**Model Context Protocol (MCP) SDK**](https://github.com/modelcontextprotocol/go-sdk): SDK for building MCP servers and clients.
-- [**Redis Go Client**](https://github.com/redis/go-redis): Type-safe Redis client for Go.
-- [**Bubble Tea**](https://github.com/charmbracelet/bubbletea): A powerful TUI framework for Go.
-- [**Lip Gloss**](https://github.com/charmbracelet/lipgloss): Style and layout primitives for the terminal.
-- [**goai**](https://github.com/zendev-sh/goai): A Go library for integrating with multiple LLM providers (OpenAI, Anthropic, Gemini) with a unified interface and built-in agentic tool-calling loop support.
-- [**Cobra**](https://github.com/spf13/cobra): A library for creating powerful modern CLI applications.
-- [**Glamour**](https://github.com/charmbracelet/glamour): Markdown rendering for the terminal.
+The project includes a powerful, agentic CLI that acts as a security analyst assistant.
 
-see [PKG.md](PKG.md) for detailed list.
+- **Interactive TUI**: Built with Bubble Tea and Lip Gloss for a modern terminal experience.
+- **Multi-Provider Support**: Seamlessly switch between OpenAI, Anthropic, and Google Gemini models.
+- **Interactive Model Selection**: Pick your preferred provider and model on startup if not pre-configured.
+- **Conversation Memory**: Built-in context management for long-running investigations (type `/memory` to view).
+- **One-Shot Execution**: Run quick queries and exit using the `--prompt` or `-p` flag.
+- **Markdown Rendering**: High-quality rendering of tables and analysis results using Glamour.
+- **Optional Web UI**: Use the `--webui` flag to start a local web server with a similar look and feel to the terminal experience.
+
+### CLI Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--model` | `-m` | `""` | Model ID to use (e.g. `gpt-5`, `claude-sonnet-4-6`). Falls back to `ELASTIC_MODEL` env var or interactive selection. |
+| `--memory` | | `true` | Enable conversation memory across turns. |
+| `--prompt` | `-p` | `""` | Run a single prompt non-interactively and exit. |
+| `--webui` | | `false` | Start the optional browser-based Web UI instead of the TUI. |
+| `--port` | | `8080` | Port for the Web UI server. |
+
+### Web UI (Browser Interface)
+![Elastic Security Web UI](webui.png)
+
+If you prefer a browser-based interface that maintains the same "security terminal" aesthetic:
+
+```bash
+./elastic-cli --webui --port 8080
+```
+
+Open `http://localhost:8080` in your browser to start.
+
+The Web UI provides a specialized workspace for security investigations:
+
+- **Interactive Security Console**: A modern, responsive interface designed for deep-dive security analysis.
+- **Dual-Panel Workspace**:
+    - **Investigation Feed**: A real-time conversation stream with the AI analyst. Includes full Markdown support for high-quality reports, data tables, and formatted analysis.
+    - **Execution Trace (Tool Activity)**: A dedicated sidebar that provides visibility into the agent's thought process. Monitor tool calls as they happen, with expandable cards showing input arguments and raw output results.
+- **Real-time Feedback**: Powered by WebSockets to provide immediate updates on tool progress ("Analyzing request", "Running search_security_events", etc.) and streaming responses.
+- **Command History**: Efficiently navigate previous queries using `Up/Down` arrow keys, with history persisted across browser sessions.
+- **Session Management**: Quickly clear context and start fresh investigations with a single click.
+- **Export to Markdown**: Save your entire investigation, including both your queries and the AI's analysis, as a formatted Markdown file for easy documentation or reporting.
+- **Agentic Intelligence**: The same powerful security analyst from the CLI, tuned to prefer structured tools like `search_security_events` for accurate data retrieval.
+
+
+
 
 ## Prerequisites
 
