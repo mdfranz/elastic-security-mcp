@@ -8,11 +8,17 @@ It consists of two main components:
 
 For a detailed look at how these components interact, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Screenshots
+
+### TUI (Terminal User Interface)
+![Elastic Security TUI](tui.png)
+
+### Web UI (Browser Interface)
+![Elastic Security Web UI](webui.png)
+
 ## Components Overview
 
 ## Elastic Security Assistant (Web UI)
-
-![Elastic Security Web UI](elastic-ndr-webui.png)
 
 If you prefer a browser-based interface that maintains the same "security terminal" aesthetic:
 
