@@ -6,9 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
-	"syscall"
 
 	"github.com/mfranz/elastic-security-mcp/internal/elasticsearch"
 	"github.com/mfranz/elastic-security-mcp/internal/kibana"
@@ -30,28 +27,12 @@ func run() error {
 	// 1. Locking Setup
 	lockFile := util.ServerLockFile()
 
-	lf, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0644)
+	lf, err := acquireServerLock(lockFile)
 	if err != nil {
-		return fmt.Errorf("failed to open lock file %s: %w", lockFile, err)
+		return err
 	}
 
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lf.Close()
-		pidData, _ := os.ReadFile(lockFile)
-		pidStr := strings.TrimSpace(string(pidData))
-		if pidStr != "" {
-			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-				if proc, err := os.FindProcess(pid); err == nil {
-					if err := proc.Signal(syscall.Signal(0)); err == nil {
-						return fmt.Errorf("elastic-mcp-server (PID %d) is already running", pid)
-					}
-				}
-			}
-		}
-		return fmt.Errorf("elastic-mcp-server is already running (lock on %s)", lockFile)
-	}
-
-	// We have the lock; ensure we close the file descriptor (which releases flock)
+	// We have the lock; ensure we close the file descriptor (which releases the lock)
 	// and delete the lockfile when run() exits.
 	defer func() {
 		lf.Close()
@@ -138,7 +119,7 @@ func run() error {
 	}
 
 	// 5. Run Server over Stdio
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
 
 	slog.Info("Server listening on stdio")
