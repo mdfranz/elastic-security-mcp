@@ -3,6 +3,7 @@ package elasticsearch
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -33,6 +34,9 @@ func TestBuildProcessSearchRequestDefaultsAndFilters(t *testing.T) {
 	}
 	if req.From != nil {
 		t.Fatalf("From = %#v, want nil for zero offset", req.From)
+	}
+	if req.TrackTotalHits != nil {
+		t.Fatalf("TrackTotalHits = %#v, want nil by default", req.TrackTotalHits)
 	}
 
 	body := requestBodyMap(t, req)
@@ -69,6 +73,13 @@ func TestBuildProcessSearchRequestDefaultsAndFilters(t *testing.T) {
 	}
 	if !strings.Contains(string(mustJSON(t, body["sort"])), `"@timestamp"`) {
 		t.Fatalf("sort does not contain @timestamp: %#v", body["sort"])
+	}
+}
+
+func TestBuildProcessSearchRequestIncludesExactTotalOnRequest(t *testing.T) {
+	req, _ := buildProcessSearchRequest(SearchProcessesArgs{IncludeTotal: true})
+	if req.TrackTotalHits != true {
+		t.Fatalf("TrackTotalHits = %#v, want true", req.TrackTotalHits)
 	}
 }
 
@@ -139,6 +150,38 @@ func TestRunProcessSearchAllShardsFailedHint(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
 		}
+	}
+}
+
+func TestRunProcessSearchPreservesTotalRelation(t *testing.T) {
+	client, err := newTestClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := "{\"took\":4,\"_shards\":{\"total\":1,\"successful\":1,\"failed\":0},\"hits\":{\"total\":{\"value\":10000,\"relation\":\"gte\"},\"hits\":[]}}"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":      []string{"application/json"},
+				"X-Elastic-Product": []string{"Elasticsearch"},
+			},
+			Body: io.NopCloser(strings.NewReader(body)),
+		}, nil
+	}))
+	if err != nil {
+		t.Fatalf("newTestClient error: %v", err)
+	}
+
+	out, err := runProcessSearch(context.Background(), client, nil, SearchProcessesArgs{})
+	if err != nil {
+		t.Fatalf("runProcessSearch error: %v", err)
+	}
+	hits := out["hits"].(map[string]interface{})
+	total := hits["total"].(map[string]interface{})
+	if total["value"] != int64(10000) || total["relation"] != "gte" {
+		t.Fatalf("hits.total = %#v, want value 10000 and relation gte", total)
+	}
+	pagination := out["pagination"].(map[string]interface{})
+	paginationTotal := pagination["total"].(map[string]interface{})
+	if paginationTotal["relation"] != "gte" {
+		t.Fatalf("pagination.total = %#v, want relation gte", paginationTotal)
 	}
 }
 

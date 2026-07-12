@@ -15,25 +15,26 @@ import (
 )
 
 type SearchProcessesArgs struct {
-	Executable  string `json:"executable,omitempty" jsonschema:"Optional exact executable path to filter (e.g., /usr/lib/systemd/systemd-executor). Exact match only — wildcards are not supported."`
-	CommandLine string `json:"command_line,omitempty" jsonschema:"Optional command line text to filter (e.g., systemd-executor --deserialize). Matched as analyzed tokens (OR by default), not a literal substring — a partial word won't match."`
-	ProcessName string `json:"process_name,omitempty" jsonschema:"Optional process name to filter (e.g., systemd-executor). Exact match only — wildcards are not supported."`
-	ParentName  string `json:"parent_name,omitempty" jsonschema:"Optional parent process name to filter (e.g., systemd). Exact match only — wildcards are not supported."`
-	User        string `json:"user,omitempty" jsonschema:"Optional username to filter (e.g., clickhouse)"`
-	PID         int    `json:"pid,omitempty" jsonschema:"Optional exact process ID to filter"`
-	ParentPID   int    `json:"parent_pid,omitempty" jsonschema:"Optional exact parent process ID to filter"`
-	HashSHA256  string `json:"hash_sha256,omitempty" jsonschema:"Optional SHA256 hash to filter (useful for malware detection)"`
-	Host        string `json:"host,omitempty" jsonschema:"Optional hostname to filter (e.g., hp-desktop-g2)"`
-	Start       string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
-	End         string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
-	Size        int    `json:"size,omitempty" jsonschema:"Optional result count, default 20, maximum 100"`
-	From        int    `json:"from,omitempty" jsonschema:"Optional pagination offset (0-based). Use with size to page through results."`
+	Executable   string `json:"executable,omitempty" jsonschema:"Optional exact executable path to filter (e.g., /usr/lib/systemd/systemd-executor). Exact match only — wildcards are not supported."`
+	CommandLine  string `json:"command_line,omitempty" jsonschema:"Optional command line text to filter (e.g., systemd-executor --deserialize). Matched as analyzed tokens (OR by default), not a literal substring — a partial word won't match."`
+	ProcessName  string `json:"process_name,omitempty" jsonschema:"Optional process name to filter (e.g., systemd-executor). Exact match only — wildcards are not supported."`
+	ParentName   string `json:"parent_name,omitempty" jsonschema:"Optional parent process name to filter (e.g., systemd). Exact match only — wildcards are not supported."`
+	User         string `json:"user,omitempty" jsonschema:"Optional username to filter (e.g., clickhouse)"`
+	PID          int    `json:"pid,omitempty" jsonschema:"Optional exact process ID to filter"`
+	ParentPID    int    `json:"parent_pid,omitempty" jsonschema:"Optional exact parent process ID to filter"`
+	HashSHA256   string `json:"hash_sha256,omitempty" jsonschema:"Optional SHA256 hash to filter (useful for malware detection)"`
+	Host         string `json:"host,omitempty" jsonschema:"Optional hostname to filter (e.g., hp-desktop-g2)"`
+	Start        string `json:"start,omitempty" jsonschema:"Optional RFC3339 lower bound for @timestamp"`
+	End          string `json:"end,omitempty" jsonschema:"Optional RFC3339 upper bound for @timestamp"`
+	Size         int    `json:"size,omitempty" jsonschema:"Optional result count, default 20, maximum 100"`
+	From         int    `json:"from,omitempty" jsonschema:"Optional pagination offset (0-based). Use with size to page through results."`
+	IncludeTotal bool   `json:"include_total,omitempty" jsonschema:"Calculate the exact total number of matching events. Disabled by default for faster searches; when disabled, total.relation may be gte."`
 }
 
 func RegisterProcessSearchTool(server *mcp.Server, es *Client, cache *ToolCache) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_processes",
-		Description: "Search endpoint process events with flexible filtering by executable, command line, process/parent name, user, PID, hash, host, and time range. Returns process details including parent process info, user/group, and file hash.",
+		Description: "Search endpoint process events with flexible filtering by executable, command line, process/parent name, user, PID, hash, host, and time range. Returns process details including parent process info, user/group, and file hash. Exact total counting is disabled by default for performance; set include_total=true when required.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchProcessesArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_processes", &err)
 		result, err := runProcessSearch(ctx, es, cache, args)
@@ -71,6 +72,7 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 		"end", args.End,
 		"size", args.Size,
 		"from", args.From,
+		"include_total", args.IncludeTotal,
 	)
 
 	req, size := buildProcessSearchRequest(args)
@@ -101,10 +103,11 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 	// Shape response
 	data := shapeProcessResults(resp.Hits.Hits)
 	total := totalHitsValue(resp.Hits.Total)
+	formattedTotal := formatTotalHits(resp.Hits.Total)
 	output := map[string]interface{}{
 		"took": resp.Took,
 		"hits": map[string]interface{}{
-			"total": total,
+			"total": formattedTotal,
 			"data":  data,
 		},
 	}
@@ -113,11 +116,11 @@ func runProcessSearch(ctx context.Context, es *Client, cache *ToolCache, args Se
 			"from":     args.From,
 			"size":     size,
 			"returned": len(data),
-			"total":    total,
+			"total":    formattedTotal,
 		}
 	}
 
-	slog.Info("search_processes result", "took_ms", resp.Took, "latency_ms", time.Since(start).Milliseconds(), "hits", totalHitsValue(resp.Hits.Total))
+	slog.Info("search_processes result", "took_ms", resp.Took, "latency_ms", time.Since(start).Milliseconds(), "hits", total, "hits_relation", formattedTotal["relation"])
 	return output, nil
 }
 
@@ -227,7 +230,9 @@ func buildProcessSearchRequest(args SearchProcessesArgs) (*typedsearch.Request, 
 	if args.From > 0 {
 		req.From = &args.From
 	}
-	req.TrackTotalHits = true
+	if args.IncludeTotal {
+		req.TrackTotalHits = true
+	}
 	req.Source_ = &types.SourceFilter{
 		Includes: []string{
 			"@timestamp",

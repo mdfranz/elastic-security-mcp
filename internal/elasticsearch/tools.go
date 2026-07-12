@@ -49,7 +49,7 @@ type ListIndicesArgs struct {
 
 type SearchArgs struct {
 	Index string `json:"index" jsonschema:"The index pattern to search (e.g. logs-* or .alerts-security.alerts-default)"`
-	Query any    `json:"query" jsonschema:"The Elasticsearch JSON query DSL, encoded as a JSON string (e.g. \"{\\\"query\\\":{\\\"match_all\\\":{}}}\")"`
+	Query any    `json:"query" jsonschema:"Elasticsearch JSON query DSL encoded as a string. Prefer exact term filters; avoid leading wildcards. Aggregation-only size=0 queries default to track_total_hits=false unless explicitly overridden."`
 }
 
 type ClusterHealthArgs struct {
@@ -209,7 +209,19 @@ func normalizeSearchArgs(args SearchArgs) SearchArgs {
 	if strings.TrimSpace(queryStr) == "" {
 		queryStr = `{"query":{"match_all":{}}}`
 	}
-	args.Query = util.NormalizeJSON(queryStr)
+	queryStr = util.NormalizeJSON(queryStr)
+	var query map[string]interface{}
+	if err := json.Unmarshal([]byte(queryStr), &query); err == nil {
+		if size, ok := query["size"].(float64); ok && size == 0 {
+			if _, explicitlySet := query["track_total_hits"]; !explicitlySet {
+				query["track_total_hits"] = false
+				if optimized, err := json.Marshal(query); err == nil {
+					queryStr = string(optimized)
+				}
+			}
+		}
+	}
+	args.Query = queryStr
 	return args
 }
 
@@ -404,11 +416,13 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		}, nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	searchTool := &mcp.Tool{
 		Name:        "search_elastic",
 		Description: "Search Elasticsearch with a JSON query DSL encoded as a string. Important: 1. Fields containing colons (like MAC addresses) must be quoted in query_string queries (e.g., mac:\"00:11:22*\"). 2. IP fields do not support wildcards; use CIDR notation (e.g., '192.168.1.0/24') or range queries. 3. Prefer search_security_events for common filters as it handles these edge cases automatically. 4. Scope the index parameter as narrowly as possible (e.g. logs-zeek.dns-*, logs-endpoint.events.process-*); avoid a bare '*', which scatter-gathers the query across every index in the cluster and is typically 5-20x slower — use list_indices first if you're unsure of the right pattern.",
 		InputSchema: searchArgsSchema,
-	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (res *mcp.CallToolResult, extra any, err error) {
+	}
+	searchTool.Description += " Prefer exact term filters on process fields and avoid leading wildcards; constrain unavoidable wildcards by host and time. Aggregation-only size=0 queries default to track_total_hits=false. Combine related metrics into one filters aggregation instead of repeatedly scanning the same range."
+	mcp.AddTool(server, searchTool, func(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (res *mcp.CallToolResult, extra any, err error) {
 		defer recoverToolPanic("search_elastic", &err)
 		args = normalizeSearchArgs(args)
 		return searchHandler(ctx, req, args)
@@ -422,8 +436,6 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		defer recoverToolPanic("cluster_health", &err)
 		ctx, cancel := ensureToolTimeout(ctx)
 		defer cancel()
-		slog.Info("cluster_health called", "level", args.Level)
-
 		level := strings.TrimSpace(args.Level)
 		if level == "" {
 			level = "cluster"
@@ -431,6 +443,7 @@ func RegisterTools(server *mcp.Server, es *Client) {
 		if level != "cluster" && level != "indices" && level != "shards" {
 			return nil, nil, fmt.Errorf("invalid level %q: must be cluster, indices, or shards", level)
 		}
+		slog.Info("cluster_health called", "health_level", level)
 
 		healthRes, err := es.Raw.Cluster.Health(
 			es.Raw.Cluster.Health.WithContext(ctx),

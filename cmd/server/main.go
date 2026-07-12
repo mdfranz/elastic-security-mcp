@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -94,6 +95,16 @@ func run() error {
 		slog.Error("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
 		return fmt.Errorf("ELASTIC_URL and ELASTIC_KEY environment variables must be set")
 	}
+	if err := validateEndpointURL("ELASTIC_URL", elasticURL); err != nil {
+		slog.Error("Invalid Elasticsearch URL", "error", err)
+		return err
+	}
+	if kibanaURL != "" {
+		if err := validateEndpointURL("KIBANA_URL", kibanaURL); err != nil {
+			slog.Error("Invalid Kibana URL", "error", err)
+			return err
+		}
+	}
 
 	// 2. Initialize Elasticsearch Client
 	es, err := elasticsearch.NewClient(elasticURL, elasticKey)
@@ -147,5 +158,22 @@ func run() error {
 		return fmt.Errorf("server run error: %w", err)
 	}
 
+	return nil
+}
+
+func validateEndpointURL(name, value string) error {
+	if strings.Contains(value, "${") {
+		return fmt.Errorf("%s contains an unresolved environment variable placeholder", name)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", name, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s must use an http or https scheme", name)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("%s must include a host", name)
+	}
 	return nil
 }

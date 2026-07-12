@@ -51,7 +51,7 @@ func TestSearchElasticNormalization(t *testing.T) {
 			},
 			expected: SearchArgs{
 				Index: "logs-*",
-				Query: `{"query":{"match_all":{}},"size":0}`,
+				Query: `{"query":{"match_all":{}},"size":0,"track_total_hits":false}`,
 			},
 		},
 	}
@@ -74,6 +74,26 @@ func TestSearchElasticNormalization(t *testing.T) {
 				t.Errorf("Cache keys did not converge: %s != %s", key1, key2)
 			}
 		})
+	}
+}
+
+func TestSearchElasticNormalizationPreservesExplicitTrackTotalHits(t *testing.T) {
+	for _, value := range []string{"true", "1000"} {
+		t.Run(value, func(t *testing.T) {
+			query := `{"size":0,"track_total_hits":` + value + `}`
+			got := normalizeSearchArgs(SearchArgs{Index: "logs-*", Query: query})
+			if got.Query != query {
+				t.Fatalf("normalized query = %q, want %q", got.Query, query)
+			}
+		})
+	}
+}
+
+func TestSearchElasticNormalizationDoesNotChangeDocumentSearch(t *testing.T) {
+	query := `{"query":{"match_all":{}},"size":10}`
+	got := normalizeSearchArgs(SearchArgs{Index: "logs-*", Query: query})
+	if got.Query != query {
+		t.Fatalf("normalized query = %q, want %q", got.Query, query)
 	}
 }
 

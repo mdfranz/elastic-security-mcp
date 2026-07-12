@@ -42,7 +42,7 @@ TOOL SELECTION GUIDE — call the right tool immediately:
 - list_detection_rules / get_detection_rule: inspect or browse detection rules
 - list_agents: check Elastic Agent / Fleet status
 - lookup_domain / lookup_ip: fast DNS history lookup from cache
-- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express
+- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express. Prefer exact term filters on process.executable, process.name, and process.args; avoid leading wildcards on command lines or executable paths. Constrain unavoidable wildcards by host and time. Combine related metrics into one filters aggregation rather than repeatedly scanning the same range. Aggregation-only size=0 searches default to track_total_hits=false; request exact totals only when needed
 - kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
 const maxLoggedPayloadChars = 4000

@@ -10,6 +10,13 @@ For a detailed look at how these components interact, see [ARCHITECTURE.md](ARCH
 
 ## Key Features
 
+- **Security-aware search tools**: Structured, snippets-first search across network (Zeek, Suricata, Packetbeat) and endpoint (process, alerts) data, plus raw Query DSL access for advanced cases.
+- **Fast DNS lookups**: Redis-backed reverse lookups for domains and IPs from a rolling 24-hour window, alongside full historical search via Elasticsearch.
+- **Bulk export**: Stream large result sets to size-rolled JSONL files with scroll pagination and progress notifications.
+- **Kibana integration**: Optional tools for detection rules, Fleet agents, spaces, and arbitrary Kibana API access.
+- **Agentic CLI**: A TUI and Web UI client with multi-provider LLM support (OpenAI, Anthropic, Gemini), conversation memory, and Markdown-rendered investigation reports.
+- **Performance-conscious defaults**: Response caching, capped response sizes, and opt-in exact-count aggregation to keep large clusters responsive.
+
 
 ## Key Libraries
 
@@ -37,10 +44,10 @@ The MCP server provides the following tools to any compatible host:
 - **search_security_events**: Structured, snippets-first search for ECS-style network and endpoint event data (Zeek, Suricata, Packetbeat, Elastic Agent). Supports typed filters (`text`, `start`, `end`, `ip`, `src_ip`, `dst_ip`, `mac`, `domain`, `url`, `dataset`) with boosted network fields and highlighting. At least one filter is required.
 - **export_security_events**: Export large volumes of security events to JSONL files with automatic size-based file rolling, scroll-based pagination, and MCP progress notifications. Uses the same filters as `search_security_events`.
 - **search_security_alerts**: Search Elastic Security detection alerts in `.alerts-security.alerts-*` indices, filtering by query, severity, rule name, host, and time range. Projects key process execution details.
-- **search_processes**: Search endpoint process events (`logs-endpoint.events.process-*`) with flexible filtering by executable, command line, process/parent name, user, PID, SHA256 hash, host, and time range.
+- **search_processes**: Search endpoint process events (`logs-endpoint.events.process-*`) with flexible filtering by executable, command line, process/parent name, user, PID, SHA256 hash, host, and time range. Exact total counting is disabled by default for performance (`hits.total.relation` may be `gte`); pass `include_total: true` for an exact count.
 - **lookup_domain**: Fast reverse lookup of DNS activity for a domain, from a rolling 24-hour Redis index of Zeek DNS logs. Returns recent queries, source IPs, and resolved addresses. For full historical queries, use `search_security_events`.
 - **lookup_ip**: Fast reverse lookup of DNS activity (answers and queries) for an IP address, from a rolling 24-hour Redis index of Zeek DNS logs. For full historical queries, use `search_security_events`.
-- **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries. Prefer `search_security_events` for common filters; use this only when raw DSL control is required.
+- **search_elastic**: Raw Elasticsearch Query DSL access for advanced or unsupported queries. Prefer `search_security_events` for common filters; use this only when raw DSL control is required. Aggregation-only (`size: 0`) queries default `track_total_hits` to `false` unless set explicitly; prefer exact term filters and avoid leading wildcards for best performance.
 
 ### Kibana Tools (optional — requires `KIBANA_URL`)
 
@@ -253,6 +260,26 @@ OpenCode
 }
 ```
 
+Codex (in `repo/.codex/config.toml`)
+
+```
+[mcp_servers.elastic-security-mcp]
+command = "/home/mdfranz/github/elastic-security-mcp/elastic-mcp-server"
+args = []
+
+env_vars = [
+  "ELASTIC_URL",
+  "ELASTIC_KEY",
+  "KIBANA_URL",
+  "KIBANA_PASS",
+]
+
+[mcp_servers.elastic-security-mcp.env]
+# Static values can remain here.
+SERVER_LOG_LEVEL = "debug"
+KIBANA_USER = "mcp"
+```
+
 ### Python Test Client (pydantic-ai)
 
 A standalone Python test client is available in `tools/pydantic_ai_test_mcp.py`. It launches `elastic-mcp-server` as an MCP subprocess via [pydantic-ai](https://ai.pydantic.dev/), then runs it through three fixed investigation tasks (cluster/index discovery, IP enrichment, and alert-to-process pivoting) while tracking token usage per task.
@@ -290,3 +317,5 @@ Set `CLIENT_LOG_LEVEL=debug` or `SERVER_LOG_LEVEL=debug` for more detail in the 
 Set `CLIENT_LOG_PAYLOADS=true` only when you explicitly want full CLI request/response payload logging.
 
 If the server fails to start with a "already running" error, check or remove the lock file (default: `elastic-mcp-server.lock`).
+
+The server validates `ELASTIC_URL` and `KIBANA_URL` at startup and will exit immediately with a descriptive error if either is missing an `http`/`https` scheme or host, or still contains an unresolved `${...}` placeholder (a common symptom of misconfigured MCP host env templating, e.g. in `.mcp.json`).
