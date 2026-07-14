@@ -42,6 +42,7 @@ The MCP server provides the following tools to any compatible host:
 - **list_indices**: List available Elasticsearch indices with doc counts, store size, and health. Supports optional pattern filtering (e.g. `logs-zeek.*`). Results are cached for up to 1 hour.
 - **cluster_health**: Return Elasticsearch cluster health status (green/yellow/red), node counts, shard counts, and unassigned shards. Accepts an optional `level` parameter (`cluster`, `indices`, or `shards`) for more detail.
 - **search_security_events**: Structured, snippets-first search for ECS-style network and endpoint event data (Zeek, Suricata, Packetbeat, Elastic Agent). Supports typed filters (`text`, `start`, `end`, `ip`, `src_ip`, `dst_ip`, `mac`, `domain`, `url`, `dataset`) with boosted network fields and highlighting. At least one filter is required.
+- **search_security_stats**: Answer one bounded telemetry question without returning raw documents — top values (`aggregation_type: terms`), an event-rate timeline (`date_histogram`), or an approximate unique-value count (`cardinality`). Requires an explicit RFC3339 `start`/`end` window (max 31 days by default, configurable via `STATS_MAX_RANGE_HOURS`); date_histogram accepts calendar intervals (`1m`, `1h`, `1d`, `1w`, `1M`, `1q`, `1y`) or fixed intervals (e.g. `15m`, `6h`) and rejects requests whose estimated bucket count exceeds `STATS_MAX_BUCKETS` (default 250). `cardinality` results are always approximate. Exact total-hit counts are disabled by default; pass `include_total: true` for an exact count. For multiple/nested/raw aggregations, use `search_elastic` instead.
 - **export_security_events**: Export large volumes of security events to JSONL files with automatic size-based file rolling, scroll-based pagination, and MCP progress notifications. Uses the same filters as `search_security_events`.
 - **search_security_alerts**: Search Elastic Security detection alerts in `.alerts-security.alerts-*` indices, filtering by query, severity, rule name, host, and time range. Projects key process execution details.
 - **search_processes**: Search endpoint process events (`logs-endpoint.events.process-*`) with flexible filtering by executable, command line, process/parent name, user, PID, SHA256 hash, host, and time range. Exact total counting is disabled by default for performance (`hits.total.relation` may be `gte`); pass `include_total: true` for an exact count.
@@ -171,11 +172,14 @@ Optional variables:
 - `REDIS_ADDR`: Address of the Redis server. Default is `localhost:6379`.
 - `CACHE_SEARCH_SECURITY_EVENTS_TTL`: Cache TTL in seconds for `search_security_events`. Default is `600`.
 - `CACHE_SEARCH_ELASTIC_TTL`: Cache TTL in seconds for `search_elastic`. Default is `600`.
+- `CACHE_SEARCH_SECURITY_STATS_TTL`: Cache TTL in seconds for `search_security_stats`. Default is `60` — short-lived, so cached telemetry isn't mistaken for live monitoring.
 - `CACHE_LIST_INDICES_TTL`: Cache TTL in seconds for `list_indices`. Default is `3600`.
 - `MAX_RESPONSE_CHARS`: Maximum JSON response size returned by search tools before truncation. Default is `20000`.
 - `TOOL_TIMEOUT_SECS`: Per-tool execution timeout in seconds. Default is `30`.
 - `EXPORT_TIMEOUT_SECS`: Overall timeout in seconds for the `export_security_events` tool. Default is `1800` (30 minutes).
 - `EXPORT_BATCH_TIMEOUT_SECS`: Per-scroll-batch timeout in seconds during exports. Default is `180`.
+- `STATS_MAX_RANGE_HOURS`: Maximum `start`/`end` span accepted by `search_security_stats`, in hours. Default is `744` (31 days).
+- `STATS_MAX_BUCKETS`: Maximum estimated `date_histogram` bucket count accepted by `search_security_stats`. Default is `250`.
 
 ## Usage
 

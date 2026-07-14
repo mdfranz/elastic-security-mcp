@@ -227,6 +227,7 @@ func normalizeSearchArgs(args SearchArgs) SearchArgs {
 
 func RegisterTools(server *mcp.Server, es *Client) {
 	cache := NewToolCache()
+	RegisterSecurityStatsTool(server, es, cache)
 	RegisterSecuritySearchTool(server, es, cache)
 	RegisterExportSecurityEventsTool(server, es)
 	RegisterSecurityAlertsTool(server, es, cache)

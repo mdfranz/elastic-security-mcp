@@ -81,6 +81,10 @@ func SearchSecurityEventsTTL() time.Duration {
 	return ttlFromEnv("CACHE_SEARCH_SECURITY_EVENTS_TTL", 600)
 }
 
+func SearchSecurityStatsTTL() time.Duration {
+	return ttlFromEnv("CACHE_SEARCH_SECURITY_STATS_TTL", 60)
+}
+
 func ttlFromEnv(envVar string, defaultSecs int) time.Duration {
 	if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {

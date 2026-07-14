@@ -37,12 +37,13 @@ TOOL SELECTION GUIDE — call the right tool immediately:
 - search_security_alerts: detection alerts from Elastic Security rules
 - search_processes: endpoint process events (automatically searches logs-endpoint.events.process-*)
 - search_security_events: network and endpoint events — use index logs-zeek.*-* for Zeek, logs-suricata.*-* for Suricata, packetbeat-* for Packetbeat, logs-endpoint.events.network-* or logs-endpoint.events.file-* for endpoint
+- search_security_stats: prefer this for ONE bounded telemetry question — top values (terms), an event-rate timeline (date_histogram), or an approximate unique count (cardinality) — instead of search_elastic. Always pass an explicit RFC3339 start/end window; use a coarser interval (e.g. 1h instead of 1m) if the requested timeline is too granular for the window. Use aggregatable fields and add .keyword for analyzed text (e.g. dns.question.name.keyword)
 - list_indices: discover available indices before searching if unsure
 - list_kibana_spaces: discover or list available Kibana spaces
 - list_detection_rules / get_detection_rule: inspect or browse detection rules
 - list_agents: check Elastic Agent / Fleet status
 - lookup_domain / lookup_ip: fast DNS history lookup from cache
-- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express. Prefer exact term filters on process.executable, process.name, and process.args; avoid leading wildcards on command lines or executable paths. Constrain unavoidable wildcards by host and time. Combine related metrics into one filters aggregation rather than repeatedly scanning the same range. Aggregation-only size=0 searches default to track_total_hits=false; request exact totals only when needed
+- search_elastic: ONLY for raw Elasticsearch JSON DSL that no other tool can express — including multiple, nested, or otherwise raw aggregations that search_security_stats can't (it only runs one terms/date_histogram/cardinality aggregation at a time). Prefer exact term filters on process.executable, process.name, and process.args; avoid leading wildcards on command lines or executable paths. Constrain unavoidable wildcards by host and time. Combine related metrics into one filters aggregation rather than repeatedly scanning the same range. Aggregation-only size=0 searches default to track_total_hits=false; request exact totals only when needed
 - kibana_api_request: ONLY for Kibana API endpoints not covered by other tools`
 
 const maxLoggedPayloadChars = 4000
