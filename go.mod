@@ -16,7 +16,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/spf13/cobra v1.10.2
-	github.com/zendev-sh/goai v0.8.5
+	github.com/zendev-sh/goai v0.9.1
 )
 
 require (
