@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/mfranz/elastic-security-mcp/internal/elasticsearch"
 	"github.com/mfranz/elastic-security-mcp/internal/kibana"
