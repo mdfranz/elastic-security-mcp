@@ -16,7 +16,8 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/spf13/cobra v1.10.2
-	github.com/zendev-sh/goai v0.8.5
+	github.com/zendev-sh/goai v0.9.4
+	golang.org/x/sys v0.46.0
 )
 
 require (
@@ -67,7 +68,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 )
